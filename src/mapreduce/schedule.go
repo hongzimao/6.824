@@ -21,8 +21,44 @@ func (mr *Master) schedule(phase jobPhase) {
 	// them have been completed successfully should the function return.
 	// Remember that workers may fail, and that any given worker may finish
 	// multiple tasks.
-	//
-	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
-	//
+
+	switch phase {
+	case mapPhase:
+		for i, f := range mr.files {
+			
+			args := new(DoTaskArgs)
+
+			args.JobName = mr.jobName
+			args.TaskNumber = i
+			args.File = f 
+			args.NumOtherPhase = mr.nReduce
+
+			worker := <- mr.registerChannel
+	
+			ok := call(worker, "Worker.DoTask", args, new(struct{}))
+
+			if ok == false {
+				fmt.Printf("Worker %s DoTask error\n", worker)
+			}
+
+		}
+	case reducePhase:
+		for i := 0; i < mr.nReduce; i++ {
+
+			args := new(DoTaskArgs)
+
+			args.JobName = mr.jobName 
+			args.TaskNumber = i
+			args.NumOtherPhase = len(mr.files)
+
+			worker := <- mr.registerChannel
+			ok := call(worker, "Worker.DoTask", args, new(struct{}))
+
+			if ok == false {
+				fmt.Printf("Worker %s DoTask error\n", worker)
+			}
+		}
+	}
+
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }

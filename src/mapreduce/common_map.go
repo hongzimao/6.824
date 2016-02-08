@@ -2,8 +2,16 @@ package mapreduce
 
 import (
 	"hash/fnv"
+	"io/ioutil"
+	"encoding/json"
+	"os"
 )
 
+func checkErr(e error) {
+	if e != nil {
+		panic(e)
+	}
+}
 // doMap does the job of a map worker: it reads one of the input files
 // (inFile), calls the user-defined map function (mapF) for that file's
 // contents, and partitions the output into nReduce intermediate files.
@@ -14,8 +22,6 @@ func doMap(
 	nReduce int, // the number of reduce task that will be run ("R" in the paper)
 	mapF func(file string, contents string) []KeyValue,
 ) {
-	// TODO:
-	// You will need to write this function.
 	// You can find the filename for this map task's input to reduce task number
 	// r using reduceName(jobName, mapTaskNumber, r). The ihash function (given
 	// below doMap) should be used to decide which file a given key belongs into.
@@ -39,8 +45,35 @@ func doMap(
 	//   for _, kv := ... {
 	//     err := enc.Encode(&kv)
 	//
+
+	contents, e := ioutil.ReadFile(inFile)
+	checkErr(e)
+	
+	KeyValuePairs := mapF(inFile, string(contents))
+
+	encs := make([]*json.Encoder, nReduce)
+	fs := make([]*os.File, nReduce)
+
+	for r := 0; r < nReduce; r++ {
+		outFile := reduceName(jobName, mapTaskNumber, r)
+		f, e := os.Create(outFile)
+		checkErr(e)
+		encs[r] = json.NewEncoder(f)
+		fs[r] = f // to be closed later
+	}
+
+	for _, kv := range KeyValuePairs {
+		enc_idx := ihash(kv.Key) % uint32(nReduce)
+		e := encs[enc_idx].Encode(&kv)
+		checkErr(e)
+	}
+
 	// Remember to close the file after you have written all the values!
-}
+
+	for r := 0; r < nReduce; r++ {
+		fs[r].Close();
+	}
+} // end of doMap
 
 func ihash(s string) uint32 {
 	h := fnv.New32a()
