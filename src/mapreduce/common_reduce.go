@@ -41,9 +41,9 @@ func doReduce(
 	checkErr(e)
 	enc := json.NewEncoder(f)
 
-	for m := 0; m < nMap; m++ {
+	kvs := make(map[string][]string)
 
-		kvs := make(map[string][]string)
+	for m := 0; m < nMap; m++ {
 		
 		inFile := reduceName(jobName, m, reduceTaskNumber)		
 
@@ -60,11 +60,10 @@ func doReduce(
 			kvs[kv.Key] = append(kvs[kv.Key], kv.Value)
 		}
 		f.Close()
+	}
 
-		for k := range kvs {
-			enc.Encode(KeyValue{k, reduceF(k, kvs[k])})
-		}
-
+	for k := range kvs {
+		enc.Encode(KeyValue{k, reduceF(k, kvs[k])})
 	}
 
 	f.Close()
