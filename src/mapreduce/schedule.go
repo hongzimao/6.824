@@ -26,37 +26,49 @@ func (mr *Master) schedule(phase jobPhase) {
 	case mapPhase:
 		for i, f := range mr.files {
 			
-			args := new(DoTaskArgs)
-
-			args.JobName = mr.jobName
-			args.TaskNumber = i
-			args.File = f 
-			args.NumOtherPhase = mr.nReduce
+			dotask_args := new(DoTaskArgs)
+			dotask_args.Phase = mapPhase;
+			dotask_args.JobName = mr.jobName
+			dotask_args.TaskNumber = i
+			dotask_args.File = f 
+			dotask_args.NumOtherPhase = mr.nReduce
 
 			worker := <- mr.registerChannel
-	
-			ok := call(worker, "Worker.DoTask", args, new(struct{}))
 
-			if ok == false {
+			ok := call(worker, "Worker.DoTask", dotask_args, new(struct{}))
+
+			for ok == false {
 				fmt.Printf("Worker %s DoTask error\n", worker)
-			}
 
+				worker = <- mr.registerChannel // connect to another worker
+				ok = call(worker, "Worker.DoTask", dotask_args, new(struct{})) // do the task again
+			}		
+
+			go func(){ mr.registerChannel <- worker }()
 		}
+
 	case reducePhase:
 		for i := 0; i < mr.nReduce; i++ {
 
-			args := new(DoTaskArgs)
+			dotask_args := new(DoTaskArgs)
 
-			args.JobName = mr.jobName 
-			args.TaskNumber = i
-			args.NumOtherPhase = len(mr.files)
+			dotask_args.Phase = reducePhase;
+			dotask_args.JobName = mr.jobName 
+			dotask_args.TaskNumber = i
+			dotask_args.NumOtherPhase = len(mr.files)
 
 			worker := <- mr.registerChannel
-			ok := call(worker, "Worker.DoTask", args, new(struct{}))
 
-			if ok == false {
+			ok := call(worker, "Worker.DoTask", dotask_args, new(struct{}))
+
+			for ok == false {
 				fmt.Printf("Worker %s DoTask error\n", worker)
+
+				worker = <- mr.registerChannel // connect to another worker
+				ok = call(worker, "Worker.DoTask", dotask_args, new(struct{})) // do the task again
 			}
+
+			go func(){ mr.registerChannel <- worker }()
 		}
 	}
 
