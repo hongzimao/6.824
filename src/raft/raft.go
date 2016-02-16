@@ -65,6 +65,7 @@ type Raft struct {
 	currentTerm int 
 	isLeader bool // LY: may be changed to states: 0 for follower, 1 for candidate, 2 for leader
 	voteFor int
+	voteTerm int // which term the voteFor is
 
 	Logs []Log
 
@@ -97,7 +98,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isLeader bool
-	// Your code here.
 
 	term = rf.currentTerm
 	isLeader = rf.isLeader
@@ -140,10 +140,9 @@ func (rf *Raft) readPersist(data []byte) {
 // example RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
-	// Your data here.
 	Term int
 	CandidateId int
-	LastLogIndex int
+	LastLogIndex int // start from 0
 	LastLogTerm int
 }
 
@@ -151,17 +150,22 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 //
 type RequestVoteReply struct {
-	// Your data here.
 	Term int
 	VoteGranted bool
 }
 
 type AppendEntriesArgs struct {
-
+	Term int
+	LeaderId int
+	// PrevLogIndx int
+	// PrevLogTerm int
+	// Entries []Log
+	// LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-
+	Term int
+	Success bool
 }
 
 // --------------------------------------------------------------------
@@ -171,7 +175,6 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
 
 	earlyReturn := false
 	rf.termLock.Lock()
@@ -183,22 +186,48 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.termLock.Unlock()
 	if earlyReturn { return }
 
+	rf.termLock.Lock()
+	if args.Term > rf.currentTerm {
+		rf.isLeader = false // back to follower
+	}
 	rf.currentTerm = args.Term
 	reply.Term = args.Term 
 	reply.VoteGranted = false
+	rf.termLock.Unlock()
 
 	rf.voteLock.Lock()
-	if rf.voteFor == -1 || rf.voteFor == args.CandidateId { // -1 for nil
-		if endLogTerm(rf.Logs, -1) <= args.Term {
+	if (rf.voteTerm < args.Term) || 
+	   ( rf.voteTerm == args.Term && rf.voteFor == args.CandidateId) { // -1 for nil
+		if (endLogTerm(rf.Logs, -1) < args.LastLogTerm) ||
+		   (endLogTerm(rf.Logs, -1) == args.LastLogTerm && len(rf.Logs)-1 <= args.LastLogIndex) {
 			rf.voteFor = args.CandidateId
+			rf.voteTerm = args.Term
 			reply.VoteGranted = true
-		}
+		} 
 	}	
 	rf.voteLock.Unlock()
 }
 
 func (rf *Raft) ReceiveHeartbeat(args AppendEntriesArgs, reply *AppendEntriesReply){
-	rf.elecTimer = time.Now().UnixNano()
+
+	earlyReturn := false
+	rf.termLock.Lock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		earlyReturn = true
+	}
+	rf.termLock.Unlock()
+	if earlyReturn {return}
+
+	rf.termLock.Lock()
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.isLeader = false // back to follower
+	}
+	rf.termLock.Unlock()
+
+	rf.elecTimer = time.Now().UnixNano() // reset timer
 }
 
 // --------------------------------------------------------------------
@@ -229,10 +258,18 @@ func (rf *Raft) sendHeartbeat(server int, args AppendEntriesArgs, reply *AppendE
 
 func (rf *Raft) broadcastHeartbeat() {
 	for {
+		if !rf.isLeader {
+			break
+		}
+	
 		time.Sleep( 10 * time.Millisecond) 
+
+		var args AppendEntriesArgs
+		args.Term = rf.currentTerm
+		args.LeaderId = rf.me
+
 		for i := 0; i < len(rf.peers); i++ {
 			go func(j int) {
-				var args AppendEntriesArgs
 				reply := &AppendEntriesReply{}
 				rf.sendHeartbeat(j, args, reply)
 				}(i)
@@ -242,13 +279,16 @@ func (rf *Raft) broadcastHeartbeat() {
 
 func (rf *Raft) ElectionTimeout() {
 	for {
-		
 		timeout := randIntRange(150, 300) // 150 ~ 300 ms
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
 
-		if (time.Now().UnixNano() - rf.elecTimer) > int64(timeout * 1e6) {
-
-			rf.currentTerm ++ // change to candidate, term +1
+		if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {
+			
+			rf.termLock.Lock()
+			rf.currentTerm += 1 // change to candidate, term +1
+			rf.elecTimer = time.Now().UnixNano() // reset timer
+			rf.voteFor = rf.me // vote for itself
+			rf.termLock.Unlock()
 
 			var args RequestVoteArgs
 			args.Term = rf.currentTerm
@@ -261,7 +301,7 @@ func (rf *Raft) ElectionTimeout() {
 				go func(j int) {
 					reply := &RequestVoteReply{}
 					rf.sendRequestVote(j, args, reply)
-					reqVoteChann <- reply
+					reqVoteChann <- reply // reqVote channel in 
 				}(i)
 			}
 
@@ -269,11 +309,11 @@ func (rf *Raft) ElectionTimeout() {
 			voteCount := 0
 			stillCandidate := true
 			for i := 0; i < len(rf.peers); i++ {
-				reply := <- reqVoteChann
+				reply := <- reqVoteChann // reqVote channel out
 
 				rf.termLock.Lock()
 				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
+					rf.currentTerm = reply.Term // adapt to larger term
 					stillCandidate = false
 				}
 				rf.termLock.Unlock()
@@ -338,7 +378,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here.
+	// initialization from scratch
+
 	rf.elecTimer = time.Now().UnixNano()
 
 	rf.currentTerm = -1
