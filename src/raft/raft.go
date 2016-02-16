@@ -22,7 +22,7 @@ import (
 	"labrpc"
 	"time"
 	"math/rand"
-	// "fmt"
+	"fmt"
 	)
 
 // import "bytes"
@@ -56,7 +56,6 @@ type Raft struct {
 	persister *Persister
 	me        int // index into peers[]
 
-	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
@@ -89,6 +88,13 @@ func endLogTerm(Logs []Log, initTerm int) int {
 			return initTerm
 		} else {
 			return Logs[len(Logs)-1].term
+		}
+}
+
+func (rf *Raft) backToFollower() {
+	if rf.isLeader {
+			rf.isLeader = false // back to follower
+			go rf.ElectionTimeout()
 		}
 }
 
@@ -188,7 +194,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.termLock.Lock()
 	if args.Term > rf.currentTerm {
-		rf.isLeader = false // back to follower
+		rf.backToFollower()
 	}
 	rf.currentTerm = args.Term
 	reply.Term = args.Term 
@@ -223,7 +229,7 @@ func (rf *Raft) ReceiveHeartbeat(args AppendEntriesArgs, reply *AppendEntriesRep
 	rf.termLock.Lock()
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.isLeader = false // back to follower
+		rf.backToFollower()
 	}
 	rf.termLock.Unlock()
 
@@ -279,11 +285,15 @@ func (rf *Raft) broadcastHeartbeat() {
 
 func (rf *Raft) ElectionTimeout() {
 	for {
+		if rf.isLeader{
+			break
+		}
+
 		timeout := randIntRange(150, 300) // 150 ~ 300 ms
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
 
 		if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {
-			
+			fmt.Println("restart election", rf.me)	
 			rf.termLock.Lock()
 			rf.currentTerm += 1 // change to candidate, term +1
 			rf.elecTimer = time.Now().UnixNano() // reset timer
@@ -296,7 +306,7 @@ func (rf *Raft) ElectionTimeout() {
 			args.LastLogIndex = len(rf.Logs)-1
 			args.LastLogTerm = endLogTerm(rf.Logs, -1)
 
-			reqVoteChann := make (chan *RequestVoteReply)
+			reqVoteChann := make (chan *RequestVoteReply, len(rf.peers))
 			for i := 0; i < len(rf.peers); i++ {
 				go func(j int) {
 					reply := &RequestVoteReply{}
@@ -321,12 +331,14 @@ func (rf *Raft) ElectionTimeout() {
 				if reply.VoteGranted {
 					voteCount ++
 				}
-			} // barrier
 
-			if stillCandidate && (2 * voteCount) > len(rf.peers) {
-				rf.isLeader = true
-				go rf.broadcastHeartbeat()
-			}
+				if stillCandidate && (2 * voteCount) > len(rf.peers) {
+					fmt.Println("new leader", rf.me)
+					rf.isLeader = true
+					go rf.broadcastHeartbeat()
+					break
+				}
+			} // barrier
 		}
 	}
 }
