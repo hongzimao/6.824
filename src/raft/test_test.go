@@ -36,7 +36,7 @@ func TestInitialElection(t *testing.T) {
 		t.Fatalf("term changed even though there were no failures")
 	}
 
-	fmt.Printf("  ... Passed\n")
+	fmt.Printf("  ... Passed\n") 
 }
 
 func TestReElection(t *testing.T) {
@@ -77,7 +77,7 @@ func TestReElection(t *testing.T) {
 	cfg.checkOneLeader()
 	fmt.Println("-------> check pt 5 <-------")
 
-	fmt.Printf("  ... Passed\n") 
+	fmt.Printf("  ... Passed\n")
 }
 
 func TestBasicAgree(t *testing.T) {

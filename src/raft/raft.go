@@ -43,8 +43,8 @@ type ApplyMsg struct {
 }
 
 type Log struct {
-	command interface{}
-	term int
+	Command interface{}
+	Term int
 }
 
 //
@@ -62,7 +62,7 @@ type Raft struct {
 	elecTimer int64 // the start point of election timeout
 
 	currentTerm int 
-	isLeader bool // LY: may be changed to states: 0 for follower, 1 for candidate, 2 for leader
+	isLeader bool 
 	voteFor int
 	voteTerm int // which term the voteFor is
 
@@ -86,7 +86,7 @@ func endLogTerm(Logs []Log, initTerm int) int {
 	if len(Logs)-1 < 0 {
 			return initTerm
 		} else {
-			return Logs[len(Logs)-1].term
+			return Logs[len(Logs)-1].Term
 		}
 }
 
@@ -99,7 +99,7 @@ func (rf *Raft) backToFollower() {
 
 func (rf *Raft) becomesLeader() {
 	rf.isLeader = true
-	go rf.broadcastHeartbeat()
+	go rf.broadcastAppendEntries()
 }
 
 // return currentTerm and whether this server
@@ -152,7 +152,7 @@ func (rf *Raft) readPersist(data []byte) {
 type RequestVoteArgs struct {
 	Term int
 	CandidateId int
-	LastLogIndex int // start from 0
+	LastLogIndex int // start from 1
 	LastLogTerm int
 }
 
@@ -167,10 +167,10 @@ type RequestVoteReply struct {
 type AppendEntriesArgs struct {
 	Term int
 	LeaderId int
-	// PrevLogIndx int
-	// PrevLogTerm int
-	// Entries []Log
-	// LeaderCommit int
+	PrevLogIndx int
+	PrevLogTerm int
+	Entries []Log
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -186,17 +186,14 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
-	earlyReturn := false
 	rf.termLock.Lock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		earlyReturn = true
+		rf.termLock.Unlock()
+		return
 	} 
-	rf.termLock.Unlock()
-	if earlyReturn { return }
 
-	rf.termLock.Lock()
 	if args.Term > rf.currentTerm {
 		rf.backToFollower()
 	}
@@ -208,7 +205,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.voteTerm < args.Term) || 
 	   ( rf.voteTerm == args.Term && rf.voteFor == args.CandidateId) { // -1 for nil
 		if (endLogTerm(rf.Logs, -1) < args.LastLogTerm) ||
-		   (endLogTerm(rf.Logs, -1) == args.LastLogTerm && len(rf.Logs)-1 <= args.LastLogIndex) {
+		   (endLogTerm(rf.Logs, -1) == args.LastLogTerm && len(rf.Logs) <= args.LastLogIndex) {
 			rf.voteFor = args.CandidateId
 			rf.voteTerm = args.Term
 			reply.VoteGranted = true
@@ -219,19 +216,16 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.elecTimer = time.Now().UnixNano() // reset timer
 }
 
-func (rf *Raft) ReceiveHeartbeat(args AppendEntriesArgs, reply *AppendEntriesReply){
+func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply){
 
-	earlyReturn := false
 	rf.termLock.Lock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		earlyReturn = true
+		rf.termLock.Unlock()
+		return
 	}
-	rf.termLock.Unlock()
-	if earlyReturn {return}
 
-	rf.termLock.Lock()
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.backToFollower()
@@ -258,8 +252,8 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
-func (rf *Raft) sendHeartbeat(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.ReceiveHeartbeat", args, reply)
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.ReceiveAppendEntries", args, reply)
 	return ok
 }
 
@@ -267,26 +261,30 @@ func (rf *Raft) sendHeartbeat(server int, args AppendEntriesArgs, reply *AppendE
 // Main functions 
 // --------------------------------------------------------------------
 
-func (rf *Raft) broadcastHeartbeat() {
+func (rf *Raft) broadcastAppendEntries() {
 	for {
 		time.Sleep( 10 * time.Millisecond) 
 
+		rf.termLock.Lock()
 		if !rf.isLeader {
+			rf.termLock.Unlock()
 			break
 		}
 
 		var args AppendEntriesArgs
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
+		args.Entries = []Log{}
 
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me { // RPC other servers
 				go func(j int) {
 					reply := &AppendEntriesReply{}
-					rf.sendHeartbeat(j, args, reply)
+					rf.sendAppendEntries(j, args, reply)
 					}(i)
 			}
 		}
+		rf.termLock.Unlock()
 	}
 }
 
@@ -295,11 +293,12 @@ func (rf *Raft) ElectionTimeout() {
 		timeout := randIntRange(150, 300) // 150 ~ 300 ms
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
 
+		rf.termLock.Lock()
 		if rf.isLeader{
+			rf.termLock.Unlock()
 			break
 		}
 
-		rf.termLock.Lock()
 		if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {	
 
 			rf.currentTerm += 1 // change to candidate, term +1
@@ -315,7 +314,7 @@ func (rf *Raft) ElectionTimeout() {
 			var args RequestVoteArgs
 			args.Term = rf.currentTerm
 			args.CandidateId = rf.me
-			args.LastLogIndex = len(rf.Logs)-1
+			args.LastLogIndex = len(rf.Logs)
 			args.LastLogTerm = endLogTerm(rf.Logs, -1)
 
 			reqVoteChann := make (chan *RequestVoteReply, len(rf.peers)-1) // all other servers
@@ -345,7 +344,6 @@ func (rf *Raft) ElectionTimeout() {
 					if rf.currentTerm > thisCurrentTerm {
 						stillCandidate = false // a new election starts
 					}
-					rf.termLock.Unlock()
 
 					if reply.VoteGranted {
 						voteCount += 1
@@ -354,9 +352,12 @@ func (rf *Raft) ElectionTimeout() {
 					if stillCandidate && (2 * voteCount) > len(rf.peers) {
 						fmt.Println("new leader", rf.me, thisCurrentTerm, rf.currentTerm)
 						rf.becomesLeader()
+						
+						rf.termLock.Unlock()
 						break
 					}
-				} // barrier
+					rf.termLock.Unlock()
+				} 
 			}()
 		}
 		rf.termLock.Unlock()
@@ -377,10 +378,24 @@ func (rf *Raft) ElectionTimeout() {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	
+	rf.termLock.Lock()
+	
+	if !rf.isLeader {
+		rf.termLock.Unlock()
+		return -1, -1, false
+	}
 
+	var log Log
+	log.Command = command
+	log.Term = rf.currentTerm
+	rf.Logs = append(rf.Logs, log)
+
+	index := len(rf.Logs)
+	term := rf.currentTerm
+	isLeader := rf.isLeader
+
+	rf.termLock.Unlock()
 
 	return index, term, isLeader
 }
