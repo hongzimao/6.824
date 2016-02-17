@@ -69,7 +69,6 @@ type Raft struct {
 	Logs []Log
 
 	termLock sync.Mutex
-	voteLock sync.Mutex
 }
 
 // --------------------------------------------------------------------
@@ -96,6 +95,11 @@ func (rf *Raft) backToFollower() {
 			rf.isLeader = false // back to follower
 			go rf.ElectionTimeout()
 		}
+}
+
+func (rf *Raft) becomesLeader() {
+	rf.isLeader = true
+	go rf.broadcastHeartbeat()
 }
 
 // return currentTerm and whether this server
@@ -196,12 +200,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.backToFollower()
 	}
+
 	rf.currentTerm = args.Term
 	reply.Term = args.Term 
 	reply.VoteGranted = false
-	rf.termLock.Unlock()
 
-	rf.voteLock.Lock()
 	if (rf.voteTerm < args.Term) || 
 	   ( rf.voteTerm == args.Term && rf.voteFor == args.CandidateId) { // -1 for nil
 		if (endLogTerm(rf.Logs, -1) < args.LastLogTerm) ||
@@ -211,7 +214,9 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 		} 
 	}	
-	rf.voteLock.Unlock()
+	rf.termLock.Unlock()
+
+	rf.elecTimer = time.Now().UnixNano() // reset timer
 }
 
 func (rf *Raft) ReceiveHeartbeat(args AppendEntriesArgs, reply *AppendEntriesReply){
@@ -264,41 +269,48 @@ func (rf *Raft) sendHeartbeat(server int, args AppendEntriesArgs, reply *AppendE
 
 func (rf *Raft) broadcastHeartbeat() {
 	for {
+		time.Sleep( 10 * time.Millisecond) 
+
 		if !rf.isLeader {
 			break
 		}
-	
-		time.Sleep( 10 * time.Millisecond) 
 
 		var args AppendEntriesArgs
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 
 		for i := 0; i < len(rf.peers); i++ {
-			go func(j int) {
-				reply := &AppendEntriesReply{}
-				rf.sendHeartbeat(j, args, reply)
-				}(i)
+			if i != rf.me { // RPC other servers
+				go func(j int) {
+					reply := &AppendEntriesReply{}
+					rf.sendHeartbeat(j, args, reply)
+					}(i)
+			}
 		}
 	}
 }
 
 func (rf *Raft) ElectionTimeout() {
 	for {
+		timeout := randIntRange(150, 300) // 150 ~ 300 ms
+		time.Sleep(time.Duration(timeout) * time.Millisecond)
+
 		if rf.isLeader{
 			break
 		}
 
-		timeout := randIntRange(150, 300) // 150 ~ 300 ms
-		time.Sleep(time.Duration(timeout) * time.Millisecond)
+		rf.termLock.Lock()
+		if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {	
 
-		if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {
-			fmt.Println("restart election", rf.me)	
-			rf.termLock.Lock()
 			rf.currentTerm += 1 // change to candidate, term +1
+			thisCurrentTerm := rf.currentTerm // this run of election 
+			// a new run may happen due to RPC timeout
+
 			rf.elecTimer = time.Now().UnixNano() // reset timer
 			rf.voteFor = rf.me // vote for itself
-			rf.termLock.Unlock()
+			rf.voteTerm = rf.currentTerm // because it votes for itself
+
+			fmt.Println("restart election", rf.me, rf.currentTerm)
 
 			var args RequestVoteArgs
 			args.Term = rf.currentTerm
@@ -306,40 +318,48 @@ func (rf *Raft) ElectionTimeout() {
 			args.LastLogIndex = len(rf.Logs)-1
 			args.LastLogTerm = endLogTerm(rf.Logs, -1)
 
-			reqVoteChann := make (chan *RequestVoteReply, len(rf.peers))
+			reqVoteChann := make (chan *RequestVoteReply, len(rf.peers)-1) // all other servers
 			for i := 0; i < len(rf.peers); i++ {
-				go func(j int) {
-					reply := &RequestVoteReply{}
-					rf.sendRequestVote(j, args, reply)
-					reqVoteChann <- reply // reqVote channel in 
-				}(i)
+				if i != rf.me { // RPC other servers
+					go func(j int) {
+						reply := &RequestVoteReply{}
+						rf.sendRequestVote(j, args, reply)
+						reqVoteChann <- reply // reqVote channel in 
+					}(i)
+				}
 			}
 
 			// count votes
-			voteCount := 0
+			voteCount := 1 // always vote for itself
 			stillCandidate := true
-			for i := 0; i < len(rf.peers); i++ {
-				reply := <- reqVoteChann // reqVote channel out
+			go func(){
+				for i := 0; i < len(rf.peers)-1; i++ { // all other servers
+					reply := <- reqVoteChann // reqVote channel out
 
-				rf.termLock.Lock()
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term // adapt to larger term
-					stillCandidate = false
-				}
-				rf.termLock.Unlock()
+					rf.termLock.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term // adapt to larger term
+						stillCandidate = false
+					}
 
-				if reply.VoteGranted {
-					voteCount ++
-				}
+					if rf.currentTerm > thisCurrentTerm {
+						stillCandidate = false // a new election starts
+					}
+					rf.termLock.Unlock()
 
-				if stillCandidate && (2 * voteCount) > len(rf.peers) {
-					fmt.Println("new leader", rf.me)
-					rf.isLeader = true
-					go rf.broadcastHeartbeat()
-					break
-				}
-			} // barrier
+					if reply.VoteGranted {
+						voteCount += 1
+					}
+
+					if stillCandidate && (2 * voteCount) > len(rf.peers) {
+						fmt.Println("new leader", rf.me, thisCurrentTerm, rf.currentTerm)
+						rf.becomesLeader()
+						break
+					}
+				} // barrier
+			}()
 		}
+		rf.termLock.Unlock()
 	}
 }
 
