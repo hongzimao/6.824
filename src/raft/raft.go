@@ -68,6 +68,13 @@ type Raft struct {
 
 	Logs []Log
 
+	commitIndex int
+	lastApplied int
+
+	// for leaders, re-initialize after election
+	nextIndex []int
+	matchIndex []int
+
 	termLock sync.Mutex
 }
 
@@ -431,7 +438,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = -1
 	rf.voteFor = -1 // nil
+	rf.voteTerm = -1
 	rf.isLeader = false
+
+	rf.Logs = []Log{}
+
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	
+	rf.nextIndex = []int{}
+	rf.matchIndex = []int{}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
