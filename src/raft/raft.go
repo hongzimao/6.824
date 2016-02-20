@@ -22,7 +22,7 @@ import (
 	"labrpc"
 	"time"
 	"math/rand"
-	"fmt"
+	// "fmt"
 	)
 
 // import "bytes"
@@ -306,6 +306,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		rf.backToFollower()
 	}
 
+	// fmt.Println("follower ", rf.me, rf.currentTerm, rf.Logs, "from leader", args.LeaderId, args.PrevLogIndex, args.Entries)
 	reply.Term = rf.currentTerm
 	if len(rf.Logs) < args.PrevLogIndex { // leader has longer log
 	   	reply.Success = false
@@ -323,7 +324,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 			}
 		}
 	}
-
+	// fmt.Println("follower ", rf.me, rf.currentTerm, reply.Success, rf.Logs, "leader", args.LeaderId, args.PrevLogIndex, args.Entries)
 	if reply.Success {
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = minOfTwo(args.LeaderCommit, len(rf.Logs))
@@ -374,22 +375,22 @@ func (rf *Raft) broadcastAppendEntries() {
 			break
 		}
 
-		var args AppendEntriesArgs
-		args.Term = rf.currentTerm
-		args.LeaderId = rf.me
-		args.LeaderCommit = rf.commitIndex
-
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me { // RPC other servers
 
+				var args AppendEntriesArgs
+				args.Term = rf.currentTerm
+				args.LeaderId = rf.me
+				args.LeaderCommit = rf.commitIndex
+
+				args.PrevLogIndex = rf.nextIndex[i]-1
+				args.PrevLogTerm = logIdxTerm(rf.Logs, args.PrevLogIndex-1, -1) 
+				// fmt.Println("leader:", rf.me, i, rf.currentTerm, rf.Logs, args.PrevLogIndex)
+
 				if len(rf.Logs) < rf.nextIndex[i] { // heartbeat
 					args.Entries = []Log{}
-					args.PrevLogIndex = rf.nextIndex[i]-1
-					args.PrevLogTerm = logIdxTerm(rf.Logs, args.PrevLogIndex-1, -1) 
 				} else { // user command
-					args.Entries = rf.Logs[rf.nextIndex[i]-1 : ]
-					args.PrevLogIndex = rf.nextIndex[i]-1
-					args.PrevLogTerm = logIdxTerm(rf.Logs, args.PrevLogIndex-1, -1) 
+					args.Entries = rf.Logs[args.PrevLogIndex : ]
 				}
 
 				go func(j int) {
@@ -448,7 +449,7 @@ func (rf *Raft) ElectionTimeout() {
 			rf.voteFor = rf.me // vote for itself
 			rf.voteTerm = rf.currentTerm // because it votes for itself
 
-			fmt.Println("restart election", rf.me, rf.currentTerm)
+			// fmt.Println("restart election", rf.me, rf.currentTerm)
 
 			var args RequestVoteArgs
 			args.Term = rf.currentTerm
@@ -490,7 +491,7 @@ func (rf *Raft) ElectionTimeout() {
 						}
 
 						if stillCandidate && (2 * voteCount) > len(rf.peers) {
-							fmt.Println("new leader", rf.me, thisCurrentTerm, rf.currentTerm)
+							// fmt.Println("new leader", rf.me, thisCurrentTerm, rf.currentTerm)
 							rf.becomesLeader()
 							
 							rf.termLock.Unlock()
@@ -538,7 +539,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.termLock.Unlock()
 
-	fmt.Println("start", rf.me, rf.isLeader, rf.Logs, rf.currentTerm)
+	// fmt.Println("start", rf.me, rf.isLeader, rf.Logs, rf.currentTerm)
 	return index, term, isLeader
 }
 
