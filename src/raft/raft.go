@@ -331,6 +331,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	}
 
 	rf.applyStateMachine()
+	// fmt.Println("follower", rf.me, rf.isLeader, rf.Logs, rf.currentTerm)
 
 	rf.termLock.Unlock()
 
@@ -383,6 +384,8 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				if len(rf.Logs) < rf.nextIndex[i] { // heartbeat
 					args.Entries = []Log{}
+					args.PrevLogIndex = rf.nextIndex[i]-1
+					args.PrevLogTerm = logIdxTerm(rf.Logs, args.PrevLogIndex-1, -1) 
 				} else { // user command
 					args.Entries = rf.Logs[rf.nextIndex[i]-1 : ]
 					args.PrevLogIndex = rf.nextIndex[i]-1
@@ -535,6 +538,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.termLock.Unlock()
 
+	fmt.Println("start", rf.me, rf.isLeader, rf.Logs, rf.currentTerm)
 	return index, term, isLeader
 }
 
