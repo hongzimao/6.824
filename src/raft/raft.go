@@ -451,16 +451,16 @@ func (rf *Raft) ElectionTimeout() {
 		timeout := randIntRange(150, 300) // 150 ~ 300 ms
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
 
-		rf.termLock.Lock()
+		// rf.termLock.Lock()
 		if rf.isLeader{
-			rf.termLock.Unlock()
+			// rf.termLock.Unlock()
 			break
 		}
 
 		if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {	
-
+			rf.termLock.Lock()
 			rf.currentTerm += 1 // change to candidate, term +1
-			thisCurrentTerm := rf.currentTerm // this run of election 
+			// thisCurrentTerm := rf.currentTerm // this run of election 
 			// a new run may happen due to RPC timeout
 
 			rf.elecTimer = time.Now().UnixNano() // reset timer
@@ -485,11 +485,11 @@ func (rf *Raft) ElectionTimeout() {
 					}(i)
 				}
 			}
-
+			rf.termLock.Unlock()
 			// count votes
 			voteCount := 1 // always vote for itself
 			stillCandidate := true
-			go func(){
+			// go func(){
 				for i := 0; i < len(rf.peers)-1; i++ { // all other servers
 					reply := <- reqVoteChann // reqVote channel out
 
@@ -500,9 +500,9 @@ func (rf *Raft) ElectionTimeout() {
 							stillCandidate = false
 						}
 
-						if rf.currentTerm > thisCurrentTerm {
-							stillCandidate = false // a new election starts
-						}
+						// if rf.currentTerm > thisCurrentTerm {
+						// 	stillCandidate = false // a new election starts
+						// }
 
 						if reply.VoteGranted {
 							voteCount += 1
@@ -511,19 +511,18 @@ func (rf *Raft) ElectionTimeout() {
 						if stillCandidate && (2 * voteCount) > len(rf.peers) {
 							// fmt.Println("new leader", rf.me, thisCurrentTerm, rf.currentTerm)
 							rf.becomesLeader()
-							
 							rf.termLock.Unlock()
 							break
 						}
 						rf.termLock.Unlock()
 					}
 				} 
-			}()
+			// }()
 		}
 
 		rf.persist()
 
-		rf.termLock.Unlock()
+		// rf.termLock.Unlock()
 	}
 }
 
