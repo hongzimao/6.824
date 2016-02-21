@@ -22,11 +22,10 @@ import (
 	"labrpc"
 	"time"
 	"math/rand"
+	"bytes"
+	"encoding/gob"
 	// "fmt"
 	)
-
-// import "bytes"
-// import "encoding/gob"
 
 
 
@@ -175,6 +174,16 @@ func (rf *Raft) applyStateMachine() {
 	}
 }
 
+func (rf *Raft) previousTermIdx(PrevLogIndex int) int {
+	termToSkip := rf.Logs[PrevLogIndex-1].Term
+	for i := PrevLogIndex-2; i >= 0; i -- {
+		if rf.Logs[i].Term != termToSkip {
+			return i+1
+		}
+	}
+	return 0
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -194,26 +203,24 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here.
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.Logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	// Your code here.
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.voteFor)
+	d.Decode(&rf.Logs)
 }
 
 // --------------------------------------------------------------------
@@ -250,6 +257,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+	NextIdxToSend int
 	Ok bool
 }
 
@@ -278,14 +286,18 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 
 	if (rf.voteTerm < args.Term) || 
-	   ( rf.voteTerm == args.Term && rf.voteFor == args.CandidateId) { // -1 for nil
+	   ( rf.voteTerm == args.Term && rf.voteFor == args.CandidateId) {
 		if (endLogTerm(rf.Logs, -1) < args.LastLogTerm) ||
 		   (endLogTerm(rf.Logs, -1) == args.LastLogTerm && len(rf.Logs) <= args.LastLogIndex) {
 			rf.voteFor = args.CandidateId
 			rf.voteTerm = args.Term
 			reply.VoteGranted = true
+			// fmt.Println("vote: ", rf.me, rf.Logs, args.LastLogTerm, args.LastLogIndex)
 		} 
 	}	
+
+	rf.persist()
+
 	rf.termLock.Unlock()
 
 	rf.elecTimer = time.Now().UnixNano() // reset timer
@@ -306,10 +318,10 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		rf.backToFollower()
 	}
 
-	// fmt.Println("follower ", rf.me, rf.currentTerm, rf.Logs, "from leader", args.LeaderId, args.PrevLogIndex, args.Entries)
 	reply.Term = rf.currentTerm
 	if len(rf.Logs) < args.PrevLogIndex { // leader has longer log
 	   	reply.Success = false
+	   	reply.NextIdxToSend = len(rf.Logs)+1
 	} else { // leader's PrevLogIndex is contained here
 		if args.PrevLogIndex == 0 { // reach empty
 			reply.Success = true
@@ -317,14 +329,15 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		} else {
 			if rf.Logs[args.PrevLogIndex-1].Term != args.PrevLogTerm { 	
 				reply.Success = false
+				reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex)+1
 			} else { // find match, copy the log from now on
+				reply.Success = true
 				rf.Logs = rf.Logs[:args.PrevLogIndex] // remove all that unmatched
 				rf.Logs = append(rf.Logs, args.Entries...)
-				reply.Success = true
 			}
 		}
 	}
-	// fmt.Println("follower ", rf.me, rf.currentTerm, reply.Success, rf.Logs, "leader", args.LeaderId, args.PrevLogIndex, args.Entries)
+
 	if reply.Success {
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = minOfTwo(args.LeaderCommit, len(rf.Logs))
@@ -333,6 +346,8 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	rf.applyStateMachine()
 	// fmt.Println("follower", rf.me, rf.isLeader, rf.Logs, rf.currentTerm)
+
+	rf.persist()
 
 	rf.termLock.Unlock()
 
@@ -409,7 +424,8 @@ func (rf *Raft) broadcastAppendEntries() {
 									rf.nextIndex[j] = len(rf.Logs)+1 
 									rf.matchIndex[j] = len(rf.Logs)
 								} else { // reply unsuccessful
-									rf.nextIndex[j] -= 1 
+									// rf.nextIndex[j] -= 1 
+									rf.nextIndex[j] = reply.NextIdxToSend
 									// will retry in the next AppendEntries 
 								}
 								// if majority, commit, reply to client
@@ -421,6 +437,8 @@ func (rf *Raft) broadcastAppendEntries() {
 				}(i)
 			}
 		}
+
+		rf.persist()
 
 		rf.applyStateMachine()
 
@@ -502,6 +520,9 @@ func (rf *Raft) ElectionTimeout() {
 				} 
 			}()
 		}
+
+		rf.persist()
+
 		rf.termLock.Unlock()
 	}
 }
