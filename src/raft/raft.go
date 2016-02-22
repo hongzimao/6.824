@@ -323,21 +323,19 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	   	reply.Success = false
 	   	reply.NextIdxToSend = len(rf.Logs)+1
 	} else { // leader's PrevLogIndex is contained here
-		if args.PrevLogIndex == 0 { // reach empty
+		if len(args.Entries) == 0 { // heartbeat
+			reply.Success = true
+			reply.NoUpdate = true
+		} else if args.PrevLogIndex == 0 { // reach empty
 			reply.Success = true
 			rf.Logs = args.Entries
+		} else if rf.Logs[args.PrevLogIndex-1].Term != args.PrevLogTerm { 	
+			reply.Success = false
+			reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex)+1
 		} else {
-			if len(args.Entries) == 0 { // heartbeat
 				reply.Success = true
-				reply.NoUpdate = true
-			} else if rf.Logs[args.PrevLogIndex-1].Term != args.PrevLogTerm { 	
-				reply.Success = false
-				reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex)+1
-			} else {
-					reply.Success = true
-					rf.Logs = rf.Logs[:args.PrevLogIndex] // remove all unmatched
-					rf.Logs = append(rf.Logs, args.Entries...)
-			}
+				rf.Logs = rf.Logs[:args.PrevLogIndex] // remove all unmatched
+				rf.Logs = append(rf.Logs, args.Entries...)
 		}
 	}
 
