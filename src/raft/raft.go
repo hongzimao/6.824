@@ -24,8 +24,6 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
-	// "fmt"
-	// "os"
 	)
 
 
@@ -162,7 +160,7 @@ func (rf *Raft) updateCommitIndex() { // has lock already
 }
 
 func (rf *Raft) applyStateMachine() { // has lock already
-	if rf.commitIndex > rf.lastApplied {
+	for rf.lastApplied < rf.commitIndex {
 		rf.lastApplied += 1
 
 		var applyMsg ApplyMsg
@@ -320,6 +318,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	reply.Term = rf.currentTerm
 	reply.NoUpdate = false
+
 	if len(rf.Logs) < args.PrevLogIndex { // leader has longer log
 	   	reply.Success = false
 	   	reply.NextIdxToSend = len(rf.Logs)+1
@@ -328,26 +327,24 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 			reply.Success = true
 			rf.Logs = args.Entries
 		} else {
-			if rf.Logs[args.PrevLogIndex-1].Term != args.PrevLogTerm { 	
+			if len(args.Entries) == 0 { // heartbeat
+				reply.Success = true
+				reply.NoUpdate = true
+			} else if rf.Logs[args.PrevLogIndex-1].Term != args.PrevLogTerm { 	
 				reply.Success = false
 				reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex)+1
-			} else { // find match, copy the log from now on
-				if len(args.Entries) == 0{
-					reply.Success = true
-					reply.NoUpdate = true
-				} else {
+			} else {
 					reply.Success = true
 					rf.Logs = rf.Logs[:args.PrevLogIndex] // remove all unmatched
 					rf.Logs = append(rf.Logs, args.Entries...)
-				}
 			}
 		}
 	}
 
-	if reply.Success {
-		if args.LeaderCommit > rf.commitIndex {
+	if reply.Success && 
+	   args.LeaderCommit > rf.commitIndex && 
+	   args.PrevLogTerm == logIdxTerm(rf.Logs, args.PrevLogIndex-1, -1)  {
 			rf.commitIndex = minOfTwo(args.LeaderCommit, len(rf.Logs))
-		}
 	}
 
 	rf.applyStateMachine()
@@ -393,10 +390,11 @@ func (rf *Raft) broadcastAppendEntries() {
 			break
 		}
 
+		rf.mu.Lock()
+
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me { // RPC other servers
 
-				rf.mu.Lock()
 				var args AppendEntriesArgs
 				args.Term = rf.currentTerm
 				args.LeaderId = rf.me
@@ -410,7 +408,6 @@ func (rf *Raft) broadcastAppendEntries() {
 				} else { // user command
 					args.Entries = rf.Logs[args.PrevLogIndex : ]
 				}
-				rf.mu.Unlock()
 
 				go func(j int) {
 					reply := &AppendEntriesReply{}
@@ -437,14 +434,12 @@ func (rf *Raft) broadcastAppendEntries() {
 							}
 						}
 						rf.mu.Unlock()
-					}
+					} 
 				}(i)
 			}
 		}
-
-		rf.mu.Lock()
-		rf.persist()
 		rf.updateCommitIndex()
+		rf.persist()
 		rf.applyStateMachine()
 		rf.mu.Unlock()
 	}
