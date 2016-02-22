@@ -25,9 +25,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	)
-
-
-
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -254,7 +251,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
-	NoUpdate bool // heartbeat or term+1
+	// NoUpdate bool // heartbeat or term+1
 	NextIdxToSend int
 	Ok bool
 }
@@ -306,7 +303,6 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		reply.NoUpdate = true
 		rf.mu.Unlock()
 		return
 	}
@@ -317,30 +313,24 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	}
 
 	reply.Term = rf.currentTerm
-	reply.NoUpdate = false
 
-	if len(args.Entries) == 0 { // heartbeat
-		reply.Success = true
-		reply.NoUpdate = true
-	} else if len(rf.Logs) < args.PrevLogIndex { // leader has longer log
+	if len(rf.Logs) < args.PrevLogIndex { // leader has longer log
 	   	reply.Success = false
 	   	reply.NextIdxToSend = len(rf.Logs)+1
+	} else if logIdxTerm(rf.Logs, args.PrevLogIndex-1, -1) != args.PrevLogTerm { // logs don't match
+		reply.Success = false
+		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex)+1
 	} else if args.PrevLogIndex == 0 { // reach empty
 		reply.Success = true
 		rf.Logs = args.Entries
-	} else if rf.Logs[args.PrevLogIndex-1].Term != args.PrevLogTerm { 	
-		reply.Success = false
-		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex)+1
 	} else {
-			reply.Success = true
-			rf.Logs = rf.Logs[:args.PrevLogIndex] // remove all unmatched
-			rf.Logs = append(rf.Logs, args.Entries...)
+		reply.Success = true
+		rf.Logs = rf.Logs[:args.PrevLogIndex] // remove all unmatched
+		rf.Logs = append(rf.Logs, args.Entries...)
 	}
 
 	if reply.Success && 
-	   args.LeaderCommit > rf.commitIndex && 
-	   args.Term == logIdxTerm(rf.Logs, len(rf.Logs)-1, -1) {
-	   // args.PrevLogTerm == logIdxTerm(rf.Logs, args.PrevLogIndex-1, -1)  {
+	   args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = minOfTwo(args.LeaderCommit, len(rf.Logs))
 	}
 
@@ -383,11 +373,12 @@ func (rf *Raft) broadcastAppendEntries() {
 	for {
 		time.Sleep( 50 * time.Millisecond) 
 
+		rf.mu.Lock()
+
 		if !rf.isLeader {
+			rf.mu.Unlock()			
 			break
 		}
-
-		rf.mu.Lock()
 
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me { // RPC other servers
@@ -419,10 +410,11 @@ func (rf *Raft) broadcastAppendEntries() {
 							rf.mu.Unlock()
 							return
 						} else {
-							if rf.isLeader && !reply.NoUpdate{ // heartbeat no action
+							if rf.currentTerm == args.Term { // no reordering of net pkt
 								if reply.Success { 
-									rf.nextIndex[j] = len(rf.Logs)+1 
-									rf.matchIndex[j] = len(rf.Logs)
+									logLenSent := args.PrevLogIndex + len(args.Entries)
+									rf.nextIndex[j] = logLenSent + 1 
+									rf.matchIndex[j] = logLenSent
 								} else { // reply unsuccessful
 									// rf.nextIndex[j] -= 1 
 									rf.nextIndex[j] = reply.NextIdxToSend
@@ -447,14 +439,15 @@ func (rf *Raft) ElectionTimeout() {
 		timeout := randIntRange(150, 300) // 150 ~ 300 ms
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
 
+		rf.mu.Lock()
+
 		if rf.isLeader{
+			rf.mu.Unlock()
 			break
 		}
 
 		if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {	
-			rf.mu.Lock()
 			rf.currentTerm += 1 // change to candidate, term +1
-			thisCurrentTerm := rf.currentTerm // if timeout, new election
 
 			rf.elecTimer = time.Now().UnixNano() // reset timer
 			rf.voteFor = rf.me // vote for itself
@@ -488,7 +481,7 @@ func (rf *Raft) ElectionTimeout() {
 					if reply.Ok {
 						rf.mu.Lock()
 						
-						if rf.currentTerm > thisCurrentTerm {
+						if rf.currentTerm > args.Term { // new election begins
 							stillCandidate = false
 							rf.mu.Unlock()
 							break
@@ -515,11 +508,9 @@ func (rf *Raft) ElectionTimeout() {
 					}
 				} 
 			}() 
-
 			rf.persist()
-
-			rf.mu.Unlock()
 		}
+		rf.mu.Unlock()
 	}
 }
 
