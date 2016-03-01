@@ -29,6 +29,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
 //
+// you can send an RPC with code like this:
+// ok := ck.servers[i].Call("RaftKV.Get", args, &reply)
+//
 func (ck *Clerk) Get(key string) string {
 	args := &GetArgs{Key: key}
 	for {
@@ -45,6 +48,9 @@ func (ck *Clerk) Get(key string) string {
 
 //
 // shared by Put and Append.
+//
+// you can send an RPC with code like this:
+// ok := ck.servers[i].Call("RaftKV.PutAppend", args, &reply)
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := &PutAppendArgs{Key: key, Value: value, Op: op}
