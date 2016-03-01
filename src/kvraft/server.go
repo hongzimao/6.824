@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -19,9 +20,9 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Request string  // "Put", "Append", "Get"
+	Key     string  
+	Value   string  // set to "" for Get request
 }
 
 type RaftKV struct {
@@ -32,16 +33,68 @@ type RaftKV struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	kvdb    map[string]string
+	rfidx   int 
+}
+func (kv *RaftKV) ApplyDb() {
+	for{
+		applymsg := <- kv.applyCh
+		op := applymsg.Command.(Op)
+		kv.rfidx = applymsg.Index
+
+		if op.Request == "Put" {
+			kv.kvdb[op.Key] = op.Value
+		} else if op.Request == "Append" {
+			kv.kvdb[op.Key] += op.Value
+		} else if op.Request == "Get" {
+			// dummy
+		} 
+	}
 }
 
-
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	kv.mu.Lock()
+
+	op := Op{Request: "Get", Key: args.Key, Value: ""}
+	
+	cmtidx, _, isLeader := kv.rf.Start(op)
+
+	reply.WrongLeader = false
+	for{ // wait to store in raft log
+		if !isLeader {
+			reply.WrongLeader = true
+			break
+		} else if kv.rfidx >= cmtidx {
+			reply.Value = kv.kvdb[args.Key]
+			break // log already
+		}
+		time.Sleep( 50 * time.Millisecond) // appendEntries timeout
+		_, isLeader = kv.rf.GetState()
+	}
+
+	kv.mu.Unlock()
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+
+	op := Op{Request: args.Op, Key: args.Key, Value: args.Value}
+
+	cmtidx, _, isLeader := kv.rf.Start(op)
+
+	reply.WrongLeader = false
+	for{ // wait to store in raft log
+		if !isLeader {
+			reply.WrongLeader = true
+			break
+		} else if kv.rfidx >= cmtidx {
+			break // log already
+		}
+		time.Sleep( 50 * time.Millisecond) // appendEntries timeout
+		_, isLeader = kv.rf.GetState()
+	}
+	
+	kv.mu.Unlock()
 }
 
 //
@@ -70,6 +123,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call gob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
+	gob.Register(GetArgs{})
+	gob.Register(GetReply{})
+	gob.Register(PutAppendArgs{})
+	gob.Register(PutAppendReply{})
 
 	kv := new(RaftKV)
 	kv.me = me
@@ -80,6 +137,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.kvdb = make(map[string]string)
+
+	go kv.ApplyDb()
 
 	return kv
 }

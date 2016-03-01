@@ -355,11 +355,6 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 //
 // returns true if labrpc says the RPC was delivered.
 //
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -402,7 +397,7 @@ func (rf *Raft) broadcastAppendEntries() {
 					args.Entries = rf.Logs[args.PrevLogIndex : ]
 				}
 
-				go func(j int) {
+				go func(j int, args AppendEntriesArgs) {
 					reply := &AppendEntriesReply{}
 					reply.Ok = rf.sendAppendEntries(j, args, reply)
 
@@ -429,7 +424,7 @@ func (rf *Raft) broadcastAppendEntries() {
 						}
 						rf.mu.Unlock()
 					} 
-				}(i)
+				}(i, args)
 			}
 		}
 		rf.updateCommitIndex()
@@ -525,7 +520,7 @@ func (rf *Raft) ElectionTimeout() {
 // server isn't the leader, returns false. otherwise start the
 // agreement and return immediately. there is no guarantee that this
 // command will ever be committed to the Raft log, since the leader
-// may fail or lose an election.
+// may fail.
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current

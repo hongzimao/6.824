@@ -3,7 +3,7 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
-
+// import "fmt"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -30,16 +30,33 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // keeps trying forever in the face of all other errors.
 //
 func (ck *Clerk) Get(key string) string {
+	args := &GetArgs{Key: key}
+	for {
+		for _, server := range ck.servers {
+			reply := &GetReply{}
+			ok := server.Call("RaftKV.Get", args, reply)
 
-	// You will have to modify this function.
-	return ""
+			if ok && !reply.WrongLeader {
+				return reply.Value
+			}
+		}
+	}
 }
 
 //
 // shared by Put and Append.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := &PutAppendArgs{Key: key, Value: value, Op: op}
+	for {
+		for _, server := range ck.servers {
+			reply := &PutAppendReply{}
+			ok := server.Call("RaftKV.PutAppend", args, reply)
+			if ok && !reply.WrongLeader {
+				return
+			}
+		}	
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
