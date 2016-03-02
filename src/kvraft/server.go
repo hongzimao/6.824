@@ -7,6 +7,7 @@ import (
 	"raft"
 	"sync"
 	"time"
+	// "fmt"
 )
 
 const Debug = 0
@@ -23,6 +24,8 @@ type Op struct {
 	Request string  // "Put", "Append", "Get"
 	Key     string  
 	Value   string  // set to "" for Get request
+	CltId   int64   // client unique identifier
+	SeqNum  int64
 }
 
 type RaftKV struct {
@@ -35,27 +38,33 @@ type RaftKV struct {
 
 	kvdb    map[string]string
 	rfidx   int 
+	cltsqn  map[int64]int64  // sequence number log for each client
 }
 func (kv *RaftKV) ApplyDb() {
 	for{
 		applymsg := <- kv.applyCh
 		op := applymsg.Command.(Op)
+
 		kv.rfidx = applymsg.Index
 
-		if op.Request == "Put" {
-			kv.kvdb[op.Key] = op.Value
-		} else if op.Request == "Append" {
-			kv.kvdb[op.Key] += op.Value
-		} else if op.Request == "Get" {
-			// dummy
-		} 
+		if val, ok := kv.cltsqn[op.CltId]; !ok || op.SeqNum > val {
+
+			kv.cltsqn[op.CltId] = op.SeqNum
+			if op.Request == "Put" {
+				kv.kvdb[op.Key] = op.Value
+			} else if op.Request == "Append" {
+				kv.kvdb[op.Key] += op.Value
+			} else if op.Request == "Get" {
+				// dummy
+			}
+		}
 	}
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 
-	op := Op{Request: "Get", Key: args.Key, Value: ""}
+	op := Op{Request: "Get", Key: args.Key, Value: "", CltId:args.CltId, SeqNum: args.SeqNum}
 	
 	cmtidx, _, isLeader := kv.rf.Start(op)
 
@@ -66,19 +75,18 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 			break
 		} else if kv.rfidx >= cmtidx {
 			reply.Value = kv.kvdb[args.Key]
-			break // log already
+			break // in log already
 		}
 		time.Sleep( 50 * time.Millisecond) // appendEntries timeout
 		_, isLeader = kv.rf.GetState()
 	}
-
 	kv.mu.Unlock()
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 
-	op := Op{Request: args.Op, Key: args.Key, Value: args.Value}
+	op := Op{Request: args.Op, Key: args.Key, Value: args.Value, CltId:args.CltId, SeqNum: args.SeqNum}
 
 	cmtidx, _, isLeader := kv.rf.Start(op)
 
@@ -88,12 +96,11 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.WrongLeader = true
 			break
 		} else if kv.rfidx >= cmtidx {
-			break // log already
+			break // in log already
 		}
 		time.Sleep( 50 * time.Millisecond) // appendEntries timeout
 		_, isLeader = kv.rf.GetState()
 	}
-	
 	kv.mu.Unlock()
 }
 
@@ -138,6 +145,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	kv.kvdb = make(map[string]string)
+	kv.rfidx = 0
+	
+	kv.cltsqn = make(map[int64]int64)
 
 	go kv.ApplyDb()
 

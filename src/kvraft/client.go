@@ -7,7 +7,8 @@ import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	id 	   int64
+	seqnum int64
 }
 
 func nrand() int64 {
@@ -20,7 +21,8 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.id = nrand()
+	ck.seqnum = 0
 	return ck
 }
 
@@ -33,11 +35,12 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // ok := ck.servers[i].Call("RaftKV.Get", args, &reply)
 //
 func (ck *Clerk) Get(key string) string {
-	args := &GetArgs{Key: key}
+	ck.seqnum += 1
+	args := &GetArgs{Key:key, CltId:ck.id, SeqNum:ck.seqnum}
 	for {
 		for _, server := range ck.servers {
-			reply := &GetReply{}
-			ok := server.Call("RaftKV.Get", args, reply)
+			var reply GetReply
+			ok := server.Call("RaftKV.Get", args, &reply)
 
 			if ok && !reply.WrongLeader {
 				return reply.Value
@@ -53,11 +56,12 @@ func (ck *Clerk) Get(key string) string {
 // ok := ck.servers[i].Call("RaftKV.PutAppend", args, &reply)
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := &PutAppendArgs{Key: key, Value: value, Op: op}
+	ck.seqnum += 1
+	args := &PutAppendArgs{Key:key, Value:value, Op:op, CltId:ck.id, SeqNum:ck.seqnum}
 	for {
 		for _, server := range ck.servers {
-			reply := &PutAppendReply{}
-			ok := server.Call("RaftKV.PutAppend", args, reply)
+			var reply PutAppendReply
+			ok := server.Call("RaftKV.PutAppend", args, &reply)
 			if ok && !reply.WrongLeader {
 				return
 			}
