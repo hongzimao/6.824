@@ -95,6 +95,15 @@ func minOfTwo(a, b int) int {
 		return b
 	}
 }
+
+// max of two numbers
+func maxOfTwo(a, b int) int {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
 // random number in a range
 func randIntRange(min, max int) int{
 	// rand.Seed(time.Now().UnixNano())
@@ -129,7 +138,7 @@ func (rf *Raft) becomesLeader() { // has lock already
 
 func (rf *Raft) updateCommitIndex() { // has lock already
 	if rf.isLeader {
-		for n := lastLog(rf.Logs).Index; n >= rf.commitIndex; n -- {
+		for n := lastLog(rf.Logs).Index; n >= maxOfTwo(rf.commitIndex, rf.lastIncludedIndex) ; n -- {
 			majorityMatch := false
 			majorityCount := 0
 			for i := 0; i < len(rf.peers); i++ {
@@ -219,14 +228,19 @@ func (rf *Raft) readPersist(data []byte) {
 //
 func (rf *Raft) SaveSnapshot(snapshot []byte, lastIncludedIndex int) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if lastIncludedIndex <= rf.lastIncludedIndex {
+		// already in the snapshot
+		return 
+	}
 
 	rf.persister.SaveSnapshot(snapshot)
+
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = rf.Logs[lastIncludedIndex - rf.Logs[0].Index].Term
 
 	rf.Logs = rf.Logs[lastIncludedIndex - rf.Logs[0].Index : ]
-
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) GetStateSize() int {
@@ -342,10 +356,10 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	if lastLog(rf.Logs).Index < args.PrevLogIndex { // leader has longer log
 	   	reply.Success = false
 	   	reply.NextIdxToSend = lastLog(rf.Logs).Index + 1
-	} else if args.PrevLogIndex < rf.lastIncludedIndex { // in snapshot
-		reply.Success = false
-		reply.NextIdxToSend = 1 
-		// force snapshot, if leader has no snapshot, send everything
+	} else if args.PrevLogIndex < rf.lastIncludedIndex { // in snapshot 
+		reply.Success = true
+		// things in snapshot is guaranteed to be committed
+		// can roll back to the leader's latest nextIndex
 	} else if rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term != args.PrevLogTerm { // logs don't match
 		reply.Success = false
 		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex) + 1
@@ -382,13 +396,23 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 		return
 	}
 
+	reply.Term = args.Term
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.backToFollower()
+	}
+
 	rf.persister.SaveSnapshot(args.Data)
 
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 
-	if lastLog(rf.Logs).Index > args.LastIncludedIndex {
-		rf.Logs = rf.Logs[ args.LastIncludedIndex - rf.Logs[0].Index : ]
+	if lastLog(rf.Logs).Index > args.LastIncludedIndex &&
+	   args.LastIncludedIndex >= rf.Logs[0].Index &&
+	   args.LastIncludedTerm == (rf.Logs[args.LastIncludedIndex - rf.Logs[0].Index].Term) {
+	   	rf.Logs = rf.Logs[ args.LastIncludedIndex - rf.Logs[0].Index : ]
+	   	return
 	} else {
 		rf.Logs = append([]Log{}, Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm})
 	}
@@ -623,9 +647,9 @@ func (rf *Raft) ElectionTimeout() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	
 	if !rf.isLeader {
-		rf.mu.Unlock()
 		return -1, -1, false
 	}
 
@@ -640,8 +664,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.isLeader
 
 	rf.persist()
-
-	rf.mu.Unlock()
 
 	return index, term, isLeader
 }

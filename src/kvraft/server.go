@@ -81,7 +81,7 @@ func (kv *RaftKV) CheckSnapshot() {
 	for {
 		time.Sleep( LogLenCheckerTimeout * time.Millisecond) 
 
-		if float64(kv.rf.GetStateSize()) > MaxRaftFactor * float64(kv.maxraftstate) {
+		if float64(kv.rf.GetStateSize()) / float64(kv.maxraftstate) > MaxRaftFactor {
 			kv.SaveSnapshot()
 		}
 	}
