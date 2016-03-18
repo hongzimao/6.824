@@ -339,11 +339,15 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	if lastLog(rf.Logs).Index < args.PrevLogIndex { // leader has longer log
 	   	reply.Success = false
 	   	reply.NextIdxToSend = lastLog(rf.Logs).Index + 1
-	} else if rf.Logs[args.PrevLogIndex].Term != args.PrevLogTerm { // logs don't match
+	} else if args.PrevLogIndex < rf.lastIncludedIndex { // in snapshot
 		reply.Success = false
-		// TODO: snapshot here
+		reply.NextIdxToSend = 1 
+		// force snapshot, if leader has no snapshot, send everything
+	} else if rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term != args.PrevLogTerm { // logs don't match
+		reply.Success = false
 		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex) + 1
-	} else if args.PrevLogIndex == 0 { // reach empty  // TODO: change to snapshot
+		// previousTermIdx will be 0 if hitting the snapshot
+	} else if args.PrevLogIndex == 0 { // reach empty 
 		reply.Success = true
 		rf.Logs = append(rf.Logs[0:1], args.Entries...)
 	} else {
@@ -438,48 +442,76 @@ func (rf *Raft) broadcastAppendEntries() {
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me { // RPC other servers
 
-				var args AppendEntriesArgs
-				args.Term = rf.currentTerm
-				args.LeaderId = rf.me
-				args.LeaderCommit = rf.commitIndex
+				if rf.nextIndex[i] <= rf.lastIncludedIndex {
+					// nextIndex is in snapshot, apply InstallSnapshotRPC
 
-				args.PrevLogIndex = rf.nextIndex[i] - 1
-				args.PrevLogTerm = rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term
+					args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.lastIncludedIndex, LastIncludedTerm: rf.lastIncludedTerm, Data: rf.persister.ReadSnapshot()}
 
-				if lastLog(rf.Logs).Index < rf.nextIndex[i] { // heartbeat
-					args.Entries = []Log{}
-				} else { // user command
-					args.Entries = rf.Logs[rf.nextIndex[i] - rf.Logs[0].Index : ]
-				}
+					go func(j int, args InstallSnapshotArgs) {
+						reply := &InstallSnapshotReply{}
+						ok := rf.sendInstallSnapshot(j, args, reply)
 
-				go func(j int, args AppendEntriesArgs) {
-					reply := &AppendEntriesReply{}
-					reply.Ok = rf.sendAppendEntries(j, args, reply)
+						if ok {
+							rf.mu.Lock()
+							defer rf.mu.Unlock()
 
-					if reply.Ok {
-						rf.mu.Lock()
-						if reply.Term > rf.currentTerm { // someone has higher term
-							rf.currentTerm = reply.Term // adapt to larger term
-							rf.backToFollower()
-							rf.persist()
-							rf.mu.Unlock()
-							return
-						} else {
-							if rf.currentTerm == args.Term { // no reordering of net pkt
-								if reply.Success { 
-									logLenSent := args.PrevLogIndex + len(args.Entries)
-									rf.nextIndex[j] = logLenSent + 1 
-									rf.matchIndex[j] = logLenSent
-								} else { // reply unsuccessful
-									// rf.nextIndex[j] -= 1 
-									rf.nextIndex[j] = reply.NextIdxToSend
-									// will retry in the next AppendEntries 
+							if reply.Term > rf.currentTerm {
+								rf.currentTerm = reply.Term
+								rf.backToFollower()
+								rf.persist()
+								return 
+							} else {
+								rf.nextIndex[j] = lastLog(rf.Logs).Index + 1 
+							}
+
+						}
+					}(i, args)
+
+				} else {
+
+					var args AppendEntriesArgs
+					args.Term = rf.currentTerm
+					args.LeaderId = rf.me
+					args.LeaderCommit = rf.commitIndex
+
+					args.PrevLogIndex = rf.nextIndex[i] - 1
+					args.PrevLogTerm = rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term
+
+					if lastLog(rf.Logs).Index < rf.nextIndex[i] { // heartbeat
+						args.Entries = []Log{}
+					} else { // user command
+						args.Entries = rf.Logs[rf.nextIndex[i] - rf.Logs[0].Index : ]
+					}
+
+					go func(j int, args AppendEntriesArgs) {
+						reply := &AppendEntriesReply{}
+						reply.Ok = rf.sendAppendEntries(j, args, reply)
+
+						if reply.Ok {
+							rf.mu.Lock()
+							if reply.Term > rf.currentTerm { // someone has higher term
+								rf.currentTerm = reply.Term // adapt to larger term
+								rf.backToFollower()
+								rf.persist()
+								rf.mu.Unlock()
+								return
+							} else {
+								if rf.currentTerm == args.Term { // no reordering of net pkt
+									if reply.Success { 
+										logLenSent := args.PrevLogIndex + len(args.Entries)
+										rf.nextIndex[j] = logLenSent + 1 
+										rf.matchIndex[j] = logLenSent
+									} else { // reply unsuccessful
+										// rf.nextIndex[j] -= 1 
+										rf.nextIndex[j] = reply.NextIdxToSend
+										// will retry in the next AppendEntries 
+									}
 								}
 							}
-						}
-						rf.mu.Unlock()
-					} 
-				}(i, args)
+							rf.mu.Unlock()
+						} 
+					}(i, args)
+				}
 			}
 		}
 		rf.updateCommitIndex()
