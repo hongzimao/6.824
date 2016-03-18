@@ -136,7 +136,7 @@ func (rf *Raft) updateCommitIndex() { // has lock already
 				if i == rf.me {
 					majorityCount += 1
 				} else {
-					if rf.matchIndex[i] >= n && rf.Logs[n].Term == rf.currentTerm {
+					if rf.matchIndex[i] >= n && rf.Logs[n - rf.Logs[0].Index].Term == rf.currentTerm {
 						majorityCount += 1
 					}
 				}
@@ -159,7 +159,7 @@ func (rf *Raft) applyStateMachine() { // has lock already
 
 		var applyMsg ApplyMsg
 		applyMsg.Index = rf.lastApplied
-		applyMsg.Command = rf.Logs[rf.lastApplied].Command
+		applyMsg.Command = rf.Logs[rf.lastApplied - rf.Logs[0].Index].Command
 
 		rf.applyCh <- applyMsg
 	}
@@ -167,7 +167,7 @@ func (rf *Raft) applyStateMachine() { // has lock already
 
 func (rf *Raft) previousTermIdx(PrevLogIndex int) int { // has lock already
 	termToSkip := rf.Logs[PrevLogIndex - rf.Logs[0].Index].Term
-	for i := PrevLogIndex-1; i > 0; i -- {
+	for i := PrevLogIndex - rf.Logs[0].Index - 1; i > 0; i -- {
 		if rf.Logs[i].Term != termToSkip {
 			return rf.Logs[i].Index
 		}
@@ -219,11 +219,14 @@ func (rf *Raft) readPersist(data []byte) {
 //
 func (rf *Raft) SaveSnapshot(snapshot []byte, lastIncludedIndex int) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	rf.persister.SaveSnapshot(snapshot)
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = rf.Logs[lastIncludedIndex - rf.Logs[0].Index].Term
+
+	rf.Logs = rf.Logs[lastIncludedIndex - rf.Logs[0].Index : ]
+
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) GetStateSize() int {
@@ -352,7 +355,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		rf.Logs = append(rf.Logs[0:1], args.Entries...)
 	} else {
 		reply.Success = true
-		rf.Logs = rf.Logs[:args.PrevLogIndex+1] // remove all unmatched
+		rf.Logs = rf.Logs[:args.PrevLogIndex - rf.Logs[0].Index + 1] // remove all unmatched
 		rf.Logs = append(rf.Logs, args.Entries...)
 	}
 
@@ -372,7 +375,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -395,6 +398,9 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 	applyMsg.Snapshot = args.Data
 
 	rf.applyCh <- applyMsg
+
+	rf.commitIndex = rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex
 }
 
 // --------------------------------------------------------------------

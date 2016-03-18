@@ -49,19 +49,29 @@ type RaftKV struct {
 func (kv *RaftKV) ApplyDb() {
 	for{
 		applymsg := <- kv.applyCh
-		op := applymsg.Command.(Op)
 
-		kv.rfidx = applymsg.Index
+		if applymsg.UseSnapshot {
 
-		if val, ok := kv.cltsqn[op.CltId]; !ok || op.SeqNum > val {
+			r := bytes.NewBuffer(applymsg.Snapshot)
+			d := gob.NewDecoder(r)
+			d.Decode(&kv.kvdb)
 
-			kv.cltsqn[op.CltId] = op.SeqNum
-			if op.Request == "Put" {
-				kv.kvdb[op.Key] = op.Value
-			} else if op.Request == "Append" {
-				kv.kvdb[op.Key] += op.Value
-			} else if op.Request == "Get" {
-				// dummy
+		} else {
+			
+			op := applymsg.Command.(Op)
+
+			kv.rfidx = applymsg.Index
+
+			if val, ok := kv.cltsqn[op.CltId]; !ok || op.SeqNum > val {
+
+				kv.cltsqn[op.CltId] = op.SeqNum
+				if op.Request == "Put" {
+					kv.kvdb[op.Key] = op.Value
+				} else if op.Request == "Append" {
+					kv.kvdb[op.Key] += op.Value
+				} else if op.Request == "Get" {
+					// dummy
+				}
 			}
 		}
 	}
@@ -180,6 +190,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.cltsqn = make(map[int64]int64)
 
 	go kv.ApplyDb()
+
+	go kv.CheckSnapshot()
 
 	return kv
 }
