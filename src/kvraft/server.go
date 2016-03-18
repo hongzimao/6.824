@@ -7,10 +7,15 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
 	// "fmt"
 )
 
 const Debug = 0
+
+const LogLenCheckerTimeout = 50 
+const MaxRaftFactor = 0.8
+
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -40,6 +45,7 @@ type RaftKV struct {
 	rfidx   int 
 	cltsqn  map[int64]int64  // sequence number log for each client
 }
+
 func (kv *RaftKV) ApplyDb() {
 	for{
 		applymsg := <- kv.applyCh
@@ -59,6 +65,30 @@ func (kv *RaftKV) ApplyDb() {
 			}
 		}
 	}
+}
+
+func (kv *RaftKV) CheckSnapshot() {
+	for {
+		time.Sleep( LogLenCheckerTimeout * time.Millisecond) 
+
+		if float64(kv.rf.GetStateSize()) > MaxRaftFactor * float64(kv.maxraftstate) {
+			kv.SaveSnapshot()
+		}
+	}
+}
+
+func (kv *RaftKV) SaveSnapshot() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(kv.kvdb)
+	e.Encode(kv.rfidx)
+	e.Encode(kv.cltsqn)
+	data := w.Bytes()
+	
+	kv.rf.SaveSnapshot(data, kv.rfidx)
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
