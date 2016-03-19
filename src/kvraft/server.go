@@ -56,6 +56,8 @@ func (kv *RaftKV) ApplyDb() {
 			d := gob.NewDecoder(r)
 			d.Decode(&kv.kvdb)
 
+			kv.SaveSnapshot()
+
 		} else {
 			
 			op := applymsg.Command.(Op)
@@ -99,6 +101,17 @@ func (kv *RaftKV) SaveSnapshot() {
 	data := w.Bytes()
 	
 	kv.rf.SaveSnapshot(data, kv.rfidx)
+}
+
+func (kv *RaftKV) ReadSnapshot(data []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&kv.kvdb)
+	d.Decode(&kv.rfidx)
+	d.Decode(&kv.cltsqn)
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
@@ -186,8 +199,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.kvdb = make(map[string]string)
 	kv.rfidx = 0
-	
 	kv.cltsqn = make(map[int64]int64)
+
+	kv.ReadSnapshot(persister.ReadSnapshot())
 
 	go kv.ApplyDb()
 

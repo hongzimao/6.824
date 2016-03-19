@@ -166,11 +166,13 @@ func (rf *Raft) applyStateMachine() { // has lock already
 	for rf.lastApplied < rf.commitIndex {
 		rf.lastApplied += 1
 
-		var applyMsg ApplyMsg
-		applyMsg.Index = rf.lastApplied
-		applyMsg.Command = rf.Logs[rf.lastApplied - rf.Logs[0].Index].Command
+		if rf.lastApplied > rf.lastIncludedIndex { // restart need to skip snapshot
+			var applyMsg ApplyMsg
+			applyMsg.Index = rf.lastApplied
+			applyMsg.Command = rf.Logs[rf.lastApplied - rf.Logs[0].Index].Command
 
-		rf.applyCh <- applyMsg
+			rf.applyCh <- applyMsg
+		}
 	}
 }
 
@@ -208,6 +210,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.voteFor)
 	e.Encode(rf.Logs)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -221,6 +225,8 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.currentTerm)
 	d.Decode(&rf.voteFor)
 	d.Decode(&rf.Logs)
+	d.Decode(&rf.lastIncludedIndex)
+	d.Decode(&rf.lastIncludedTerm)
 }
 
 //
@@ -241,6 +247,8 @@ func (rf *Raft) SaveSnapshot(snapshot []byte, lastIncludedIndex int) {
 	rf.lastIncludedTerm = rf.Logs[lastIncludedIndex - rf.Logs[0].Index].Term
 
 	rf.Logs = rf.Logs[lastIncludedIndex - rf.Logs[0].Index : ]
+
+	rf.persist()
 }
 
 func (rf *Raft) GetStateSize() int {
@@ -411,20 +419,24 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 	if lastLog(rf.Logs).Index > args.LastIncludedIndex &&
 	   args.LastIncludedIndex >= rf.Logs[0].Index &&
 	   args.LastIncludedTerm == (rf.Logs[args.LastIncludedIndex - rf.Logs[0].Index].Term) {
+	   	
 	   	rf.Logs = rf.Logs[ args.LastIncludedIndex - rf.Logs[0].Index : ]
-	   	return
+
 	} else {
+
+		var applyMsg ApplyMsg
+		applyMsg.UseSnapshot = true
+		applyMsg.Snapshot = args.Data
+
+		rf.applyCh <- applyMsg
+
 		rf.Logs = append([]Log{}, Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm})
+
+		rf.commitIndex = rf.lastIncludedIndex
+		rf.lastApplied = rf.lastIncludedIndex
 	}
 
-	var applyMsg ApplyMsg
-	applyMsg.UseSnapshot = true
-	applyMsg.Snapshot = args.Data
-
-	rf.applyCh <- applyMsg
-
-	rf.commitIndex = rf.lastIncludedIndex
-	rf.lastApplied = rf.lastIncludedIndex
+	rf.persist()
 }
 
 // --------------------------------------------------------------------
@@ -475,7 +487,11 @@ func (rf *Raft) broadcastAppendEntries() {
 				if rf.nextIndex[i] <= rf.lastIncludedIndex {
 					// nextIndex is in snapshot, apply InstallSnapshotRPC
 
-					args := InstallSnapshotArgs{Term: rf.currentTerm, LeaderId: rf.me, LastIncludedIndex: rf.lastIncludedIndex, LastIncludedTerm: rf.lastIncludedTerm, Data: rf.persister.ReadSnapshot()}
+					args := InstallSnapshotArgs{Term: rf.currentTerm, 
+												LeaderId: rf.me, 
+												LastIncludedIndex: rf.lastIncludedIndex, 
+												LastIncludedTerm: rf.lastIncludedTerm, 
+												Data: rf.persister.ReadSnapshot()}
 
 					go func(j int, args InstallSnapshotArgs) {
 						reply := &InstallSnapshotReply{}
