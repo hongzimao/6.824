@@ -35,6 +35,7 @@ type Op struct {
 
 type RaftKV struct {
 	mu      sync.Mutex
+	dbmu    sync.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -50,16 +51,17 @@ func (kv *RaftKV) ApplyDb() {
 	for{
 		applymsg := <- kv.applyCh
 
+		kv.dbmu.Lock()
+
 		if applymsg.UseSnapshot {
 
 			r := bytes.NewBuffer(applymsg.Snapshot)
 			d := gob.NewDecoder(r)
 			d.Decode(&kv.kvdb)
-
-			kv.SaveSnapshot()
+			d.Decode(&kv.rfidx)
+			d.Decode(&kv.cltsqn)
 
 		} else {
-			
 			op := applymsg.Command.(Op)
 
 			kv.rfidx = applymsg.Index
@@ -76,6 +78,8 @@ func (kv *RaftKV) ApplyDb() {
 				}
 			}
 		}
+
+		kv.dbmu.Unlock()
 	}
 }
 
@@ -84,14 +88,15 @@ func (kv *RaftKV) CheckSnapshot() {
 		time.Sleep( LogLenCheckerTimeout * time.Millisecond) 
 
 		if float64(kv.rf.GetStateSize()) / float64(kv.maxraftstate) > MaxRaftFactor {
+			
 			kv.SaveSnapshot()
 		}
 	}
 }
 
-func (kv *RaftKV) SaveSnapshot() {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+func (kv *RaftKV) SaveSnapshot() { 
+	kv.dbmu.Lock()
+	defer kv.dbmu.Unlock()
 
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
@@ -104,8 +109,8 @@ func (kv *RaftKV) SaveSnapshot() {
 }
 
 func (kv *RaftKV) ReadSnapshot(data []byte) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	kv.dbmu.Lock()
+	defer kv.dbmu.Unlock()
 
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)

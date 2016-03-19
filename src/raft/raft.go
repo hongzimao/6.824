@@ -245,7 +245,6 @@ func (rf *Raft) SaveSnapshot(snapshot []byte, lastIncludedIndex int) {
 
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = rf.Logs[lastIncludedIndex - rf.Logs[0].Index].Term
-
 	rf.Logs = rf.Logs[lastIncludedIndex - rf.Logs[0].Index : ]
 
 	rf.persist()
