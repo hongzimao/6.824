@@ -14,6 +14,7 @@ import (
 const Debug = 0
 
 const LogLenCheckerTimeout = 50 
+const ClientRPCTimeout = 50
 const MaxRaftFactor = 0.8
 
 
@@ -35,7 +36,6 @@ type Op struct {
 
 type RaftKV struct {
 	mu      sync.Mutex
-	dbmu    sync.Mutex
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -51,7 +51,7 @@ func (kv *RaftKV) ApplyDb() {
 	for{
 		applymsg := <- kv.applyCh
 
-		kv.dbmu.Lock()
+		kv.mu.Lock()
 
 		if applymsg.UseSnapshot {
 
@@ -79,7 +79,7 @@ func (kv *RaftKV) ApplyDb() {
 			}
 		}
 
-		kv.dbmu.Unlock()
+		kv.mu.Unlock()
 	}
 }
 
@@ -95,8 +95,7 @@ func (kv *RaftKV) CheckSnapshot() {
 }
 
 func (kv *RaftKV) SaveSnapshot() { 
-	kv.dbmu.Lock()
-	defer kv.dbmu.Unlock()
+	kv.mu.Lock()
 
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
@@ -104,13 +103,17 @@ func (kv *RaftKV) SaveSnapshot() {
 	e.Encode(kv.rfidx)
 	e.Encode(kv.cltsqn)
 	data := w.Bytes()
+
+	kvrfidx := kv.rfidx
+
+	kv.mu.Unlock()
 	
-	kv.rf.SaveSnapshot(data, kv.rfidx)
+	kv.rf.SaveSnapshot(data, kvrfidx)
 }
 
 func (kv *RaftKV) ReadSnapshot(data []byte) {
-	kv.dbmu.Lock()
-	defer kv.dbmu.Unlock()
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
@@ -120,7 +123,6 @@ func (kv *RaftKV) ReadSnapshot(data []byte) {
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
-	kv.mu.Lock()
 
 	op := Op{Request: "Get", Key: args.Key, Value: "", CltId:args.CltId, SeqNum: args.SeqNum}
 	
@@ -135,14 +137,12 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 			reply.Value = kv.kvdb[args.Key]
 			break // in log already
 		}
-		time.Sleep( 50 * time.Millisecond) // appendEntries timeout
+		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
 		_, isLeader = kv.rf.GetState()
 	}
-	kv.mu.Unlock()
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
 
 	op := Op{Request: args.Op, Key: args.Key, Value: args.Value, CltId:args.CltId, SeqNum: args.SeqNum}
 
@@ -156,10 +156,9 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		} else if kv.rfidx >= cmtidx {
 			break // in log already
 		}
-		time.Sleep( 50 * time.Millisecond) // appendEntries timeout
+		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
 		_, isLeader = kv.rf.GetState()
 	}
-	kv.mu.Unlock()
 }
 
 //

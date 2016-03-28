@@ -668,10 +668,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	var log Log
-	log.Command = command
-	log.Term = rf.currentTerm
-	log.Index = lastLog(rf.Logs).Index + 1
+	log := Log{Command: command, Term: rf.currentTerm, Index: lastLog(rf.Logs).Index + 1}
+
 	rf.Logs = append(rf.Logs, log)
 
 	index := lastLog(rf.Logs).Index
