@@ -1,7 +1,7 @@
 #!/bin/sh
 i=0
-while [ $i -lt 10 ]; do
+while [ $i -lt 100 ]; do
 	  echo "Testing ------ " $i
-	    go test
+	    go test 
 	      let i+=1
       done

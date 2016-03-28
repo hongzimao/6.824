@@ -104,9 +104,9 @@ func (kv *RaftKV) SaveSnapshot() {
 	e.Encode(kv.cltsqn)
 	data := w.Bytes()
 
-	kvrfidx := kv.rfidx
+	kvrfidx := kv.rfidx  // preserve this value outside the lock
 
-	kv.mu.Unlock()
+	kv.mu.Unlock()  // has to unlock here, otherwise deadlock
 	
 	kv.rf.SaveSnapshot(data, kvrfidx)
 }

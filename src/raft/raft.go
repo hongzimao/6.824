@@ -422,18 +422,16 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 	   	rf.Logs = rf.Logs[ args.LastIncludedIndex - rf.Logs[0].Index : ]
 
 	} else {
-
-		var applyMsg ApplyMsg
-		applyMsg.UseSnapshot = true
-		applyMsg.Snapshot = args.Data
-
-		rf.applyCh <- applyMsg
-
+		
 		rf.Logs = append([]Log{}, Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm})
-
-		rf.commitIndex = rf.lastIncludedIndex
-		rf.lastApplied = rf.lastIncludedIndex
 	}
+
+	rf.commitIndex = rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex
+
+	applyMsg := ApplyMsg{UseSnapshot: true, Snapshot:args.Data}
+
+	rf.applyCh <- applyMsg
 
 	rf.persist()
 }
