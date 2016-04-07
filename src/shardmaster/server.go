@@ -12,6 +12,8 @@ const LogLenCheckerTimeout = 50
 const ClientRPCTimeout = 50
 const MaxRaftFactor = 0.8
 
+const VOIDGID = 0
+
 
 type ShardMaster struct {
 	mu      sync.Mutex
@@ -48,97 +50,55 @@ func (sm *ShardMaster) LastConfig() Config {
 	return sm.configs[len(sm.configs) - 1]
 }
 
-func (sm *ShardMaster) JoinLoadBalance() {
-	if len(sm.LastConfig().Groups) == 1 {
-		// first (or last) group, assign all shards there
-		for GID, _ := range sm.LastConfig().Groups {
-			for i := 0; i < NShards; i++ {
-				sm.configs[len(sm.configs)-1].Shards[i] = GID
-			}
-		}
-	} else {
-		// load balance
-		// bear with my brute force..
+func (sm *ShardMaster) LoadBalance() {
 
-		maLoad := make(map[int]int)  // each GID load
-		maIdx := make(map[int][]int) // shards on each GID
+	// bear with my brute force..
 
-		for GID, _ := range sm.LastConfig().Groups {
-			maLoad[GID] = 0
-			maIdx[GID] = []int{}
-		}
+	maLoad := make(map[int]int)  // each GID load
+	maIdx := make(map[int][]int) // shards on each GID
 
-		for i := 0; i < NShards; i++ {
-			maLoad[sm.LastConfig().Shards[i]] += 1
-			maIdx[sm.LastConfig().Shards[i]] = append(maIdx[sm.LastConfig().Shards[i]], i)
-		}
+	maLoad[VOIDGID] = 0
+	maIdx[VOIDGID] = []int{}
 
-		for {
+	for GID, _ := range sm.LastConfig().Groups {
+		maLoad[GID] = 0
+		maIdx[GID] = []int{}
+	}
 
-			maxGID := getMaxGID(maLoad)
-			minGID := getMinGID(maLoad)
+	for i := 0; i < NShards; i++ {
+		maLoad[sm.LastConfig().Shards[i]] += 1
+		maIdx[sm.LastConfig().Shards[i]] = append(maIdx[sm.LastConfig().Shards[i]], i)
+	}
 
-			if abs(maLoad[maxGID] - maLoad[minGID]) <= 1 {
-				break
-			}
+	for {
 
-			shard := maIdx[maxGID][0]
-
-			sm.configs[len(sm.configs)-1].Shards[shard] = minGID
-
-			maLoad[maxGID] -= 1
-			maLoad[minGID] += 1
-
-			maIdx[maxGID] = maIdx[maxGID][1:]
-			maIdx[minGID] = append(maIdx[minGID], shard)
+		maxGID := getMaxGID(maLoad)
+		minGID := getMinGID(maLoad)
+		
+		if maxGID != VOIDGID && abs(maLoad[maxGID] - maLoad[minGID]) <= 1 {
+			break
 		}
 
+		shard := maIdx[maxGID][0]
+
+		sm.configs[len(sm.configs)-1].Shards[shard] = minGID
+
+		maLoad[maxGID] -= 1
+		maLoad[minGID] += 1
+
+		maIdx[maxGID] = maIdx[maxGID][1:]
+		maIdx[minGID] = append(maIdx[minGID], shard)
 	}
 }
 
-func (sm *ShardMaster) LeaveLoadBalance(leftGID int) {
-	if len(sm.LastConfig().Groups) == 0 {
-		// no group alive, assign all to invalid group
-		for i := 0; i < NShards; i++ {
-			sm.configs[len(sm.configs)-1].Shards[i] = 0
-		}
-
-	} else {
-		// load balance
-		// bear with my brute force..
-
-		maLoad := make(map[int]int)  // each GID load
-		maIdx := make(map[int][]int) // shards on each GID
-
-		for GID, _ := range sm.LastConfig().Groups {
-			maLoad[GID] = 0
-			maIdx[GID] = []int{}
-		}
-
-		for i := 0; i < NShards; i++ {
-			maLoad[sm.LastConfig().Shards[i]] += 1
-			maIdx[sm.LastConfig().Shards[i]] = append(maIdx[sm.LastConfig().Shards[i]], i)
-		}
-
-		for {
-
-			minGID := getMinExcludeGID(maLoad, leftGID)
-
-			if maLoad[leftGID] == 0 {
-				break
+func (sm *ShardMaster) InvalidGroups(GIDs []int){
+	for i := 0; i < NShards; i++ {
+		for j := range GIDs {
+			if sm.LastConfig().Shards[i] == GIDs[j] {
+				sm.configs[len(sm.configs)-1].Shards[i] = VOIDGID
+				break		
 			}
-
-			shard := maIdx[leftGID][0]
-
-			sm.configs[len(sm.configs)-1].Shards[shard] = minGID
-
-			maLoad[leftGID] -= 1
-			maLoad[minGID] += 1
-
-			maIdx[leftGID] = maIdx[leftGID][1:]
-			maIdx[minGID] = append(maIdx[minGID], shard)
 		}
-
 	}
 }
 
@@ -151,6 +111,11 @@ func abs(n int) int {
 }
 
 func getMaxGID(maLoad map[int]int) int {
+
+	if maLoad[VOIDGID] > 0 {
+		return VOIDGID
+	}
+
 	maxLoad := 0
 	maxGID := 0
 	for GID, load := range maLoad {
@@ -166,19 +131,9 @@ func getMinGID(maLoad map[int]int) int {
 	minLoad := NShards
 	minGID := 0
 	for GID, load := range maLoad {
-		if load < minLoad {
-			minGID = GID
-			minLoad = load
-		}
-	}
-	return minGID
-}
-
-func getMinExcludeGID(maLoad map[int]int, leftGID int) int {
-	minLoad := NShards
-	minGID := 0
-	for GID, load := range maLoad {
-		if load < minLoad && GID != leftGID {
+		if GID == VOIDGID {
+			continue
+		} else if load <= minLoad {
 			minGID = GID
 			minLoad = load
 		}
@@ -203,14 +158,19 @@ func (sm *ShardMaster) ApplyDb() {
 			if op.Request == "Join" {
 
 				sm.CloneLastConfig()
-				sm.configs[len(sm.configs)-1].Groups[op.GID] = op.Servers
-				sm.JoinLoadBalance()
+				for GID, servers := range op.Servers{
+					sm.configs[len(sm.configs)-1].Groups[GID] = servers
+				}
+				sm.LoadBalance()
 
 			} else if op.Request == "Leave" {
 
 				sm.CloneLastConfig()
-				delete(sm.configs[len(sm.configs)-1].Groups, op.GID)
-				sm.LeaveLoadBalance(op.GID)
+				for i := range op.GIDs {
+					delete(sm.configs[len(sm.configs)-1].Groups, op.GIDs[i])	
+				}
+				sm.InvalidGroups(op.GIDs)
+				sm.LoadBalance()
 
 			} else if op.Request == "Move" {
 
@@ -229,8 +189,9 @@ func (sm *ShardMaster) ApplyDb() {
 
 type Op struct {
 	Request string  // "Join", "Leave", "Move", "Query"
-	GID     int     
-	Servers []string
+	GIDs    []int     
+	GID     int
+	Servers map[int][]string
 	Shard   int
 	Num     int
 	Value   string  
@@ -240,7 +201,7 @@ type Op struct {
 
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
-	op := Op{Request: "Join", GID: args.GID, Servers: args.Servers, CltId:args.CltId, SeqNum: args.SeqNum}
+	op := Op{Request: "Join", Servers: args.Servers, CltId:args.CltId, SeqNum: args.SeqNum}
 	
 	cmtidx, _, isLeader := sm.rf.Start(op)
 
@@ -259,7 +220,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
-	op := Op{Request: "Leave", GID: args.GID, CltId:args.CltId, SeqNum: args.SeqNum}
+	op := Op{Request: "Leave", GIDs: args.GIDs, CltId:args.CltId, SeqNum: args.SeqNum}
 	
 	cmtidx, _, isLeader := sm.rf.Start(op)
 

@@ -48,10 +48,10 @@ func (ck *Clerk) Query(num int) Config {
 	}
 }
 
-func (ck *Clerk) Join(gid int, servers []string) {
+func (ck *Clerk) Join(servers map[int][]string) {
 	ck.seqnum += 1
 
-	args := &JoinArgs{CltId: ck.id, SeqNum: ck.seqnum, GID: gid, Servers: servers}
+	args := &JoinArgs{CltId: ck.id, SeqNum: ck.seqnum, Servers: servers}
 
 	for {
 		// try each known server.
@@ -66,10 +66,10 @@ func (ck *Clerk) Join(gid int, servers []string) {
 	}
 }
 
-func (ck *Clerk) Leave(gid int) {
+func (ck *Clerk) Leave(gids []int) {
 	ck.seqnum += 1
 
-	args := &LeaveArgs{CltId: ck.id, SeqNum: ck.seqnum, GID: gid}
+	args := &LeaveArgs{CltId: ck.id, SeqNum: ck.seqnum, GIDs: gids}
 
 	for {
 		// try each known server.
