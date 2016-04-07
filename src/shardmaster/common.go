@@ -40,6 +40,8 @@ type Err string
 type JoinArgs struct {
 	GID     int      // unique replica group ID
 	Servers []string // group server ports
+	CltId  int64
+	SeqNum int64
 }
 
 type JoinReply struct {
@@ -49,6 +51,8 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GID int
+	CltId  int64
+	SeqNum int64
 }
 
 type LeaveReply struct {
@@ -59,6 +63,8 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+	CltId  int64
+	SeqNum int64
 }
 
 type MoveReply struct {
@@ -68,6 +74,8 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+	CltId  int64
+	SeqNum int64
 }
 
 type QueryReply struct {

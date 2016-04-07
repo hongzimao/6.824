@@ -50,7 +50,7 @@ type RaftKV struct {
 func (kv *RaftKV) ApplyDb() {
 	for{
 		applymsg := <- kv.applyCh
-
+		
 		kv.mu.Lock()
 
 		if applymsg.UseSnapshot {
