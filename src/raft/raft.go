@@ -616,7 +616,7 @@ func (rf *Raft) ElectionTimeout() {
 						}
 					}
 
-					go func() {
+					go func(args RequestVoteArgs) {
 						// count votes
 						voteCount := 1 // always vote for itself
 						stillCandidate := true
@@ -653,7 +653,7 @@ func (rf *Raft) ElectionTimeout() {
 								rf.mu.Unlock()
 							}
 						} 
-					}() 
+					}(args) 
 					rf.persist()
 				}
 				rf.mu.Unlock()
