@@ -33,6 +33,7 @@ import (
 //
 
 const appendEntriesTimeout = 50
+const receiveVoteTimeout = 100
 const requestVoteTimeoutMin = 150
 const requestVoteTimeoutMax = 300
 
@@ -259,9 +260,6 @@ func (rf *Raft) GetStateSize() int {
 // --------------------------------------------------------------------
 // Structs
 // --------------------------------------------------------------------
-//
-// example RequestVote RPC arguments structure.
-//
 type RequestVoteArgs struct {
 	Term int
 	CandidateId int
@@ -269,9 +267,6 @@ type RequestVoteArgs struct {
 	LastLogTerm int
 }
 
-//
-// example RequestVote RPC reply structure.
-//
 type RequestVoteReply struct {
 	Term int
 	VoteGranted bool
@@ -599,63 +594,70 @@ func (rf *Raft) ElectionTimeout() {
 					rf.voteFor = rf.me // vote for itself
 					rf.voteTerm = rf.currentTerm // because it votes for itself
 
-					var args RequestVoteArgs
-					args.Term = rf.currentTerm
-					args.CandidateId = rf.me
-					args.LastLogIndex = lastLog(rf.Logs).Index
-					args.LastLogTerm = lastLog(rf.Logs).Term
+					args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLog(rf.Logs).Index, LastLogTerm: lastLog(rf.Logs).Term}
 
 					reqVoteChann := make (chan *RequestVoteReply, len(rf.peers)-1) // all other servers
+
 					for i := 0; i < len(rf.peers); i++ {
+
 						if i != rf.me { // RPC other servers
-							go func(j int) {
+
+							go func(i int){
+
+								ldch := make(chan bool) // for RPC timeout
 								reply := &RequestVoteReply{}
-								reply.Ok = rf.sendRequestVote(j, args, reply)
-								reqVoteChann <- reply // reqVote channel in 
+
+								go func(i int, args RequestVoteArgs) {
+									ldch <- rf.sendRequestVote(i, args, reply)
+								}(i, args)
+
+								select{
+									case <- ldch: // RPC return 
+										reply.Ok = true
+									case <- time.After(receiveVoteTimeout * time.Millisecond): // RPC timeout
+										reply.Ok = false
+								}
+								reqVoteChann <- reply
+							
 							}(i)
 						}
 					}
 
-					go func(args RequestVoteArgs) {
-						// count votes
-						voteCount := 1 // always vote for itself
-						stillCandidate := true
+					// count votes
+					voteCount := 1 // always vote for itself
+					stillCandidate := true
 
-						for i := 0; i < len(rf.peers)-1 ; i++ { // all other servers
-							reply := <- reqVoteChann // reqVote channel out
+					for i := 0; i < len(rf.peers)-1 ; i++ { // all other servers
 
-							if reply.Ok {
-								rf.mu.Lock()
-								
-								if rf.currentTerm > args.Term { // new election begins
-									stillCandidate = false
-									rf.mu.Unlock()
-									break
-								}
-
-								if reply.Term > rf.currentTerm {
-									rf.currentTerm = reply.Term // adapt to larger term
-									rf.persist()
-									stillCandidate = false
-									rf.mu.Unlock()
-									break
-								}
-
-								if reply.VoteGranted {
-									voteCount += 1
-								}
-
-								if stillCandidate && (2 * voteCount) > len(rf.peers) {
-									rf.becomesLeader()
-									rf.mu.Unlock()
-									break
-								}
-								rf.mu.Unlock()
+						reply := <- reqVoteChann // reqVote channel out
+						
+						if reply.Ok {
+							
+							if rf.currentTerm > args.Term { // new election begins
+								stillCandidate = false
+								break
 							}
-						} 
-					}(args) 
+
+							if reply.Term > rf.currentTerm {
+								rf.currentTerm = reply.Term // adapt to larger term
+								rf.persist()
+								stillCandidate = false
+								break
+							}
+
+							if reply.VoteGranted {
+								voteCount += 1
+							}
+
+							if stillCandidate && (2 * voteCount) > len(rf.peers) {
+								rf.becomesLeader()
+								break
+							}
+						}
+					} 
 					rf.persist()
 				}
+
 				rf.mu.Unlock()
 		}
 	}
