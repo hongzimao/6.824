@@ -25,6 +25,9 @@ type ShardMaster struct {
 	cltsqn  map[int64]int64  // sequence number log for each client
 
 	configs []Config // indexed by config num
+
+	// close goroutine
+	killIt chan bool
 }
 
 func (sm *ShardMaster) CloneLastConfig() {
@@ -143,47 +146,50 @@ func getMinGID(maLoad map[int]int) int {
 
 func (sm *ShardMaster) ApplyDb() {
 	for{
-		applymsg := <- sm.applyCh
-		
-		sm.mu.Lock()
+		select {
+			case <- sm.killIt:
+				return
+			default:		
+				applymsg := <- sm.applyCh
+				
+				sm.mu.Lock()
 
-		op := applymsg.Command.(Op)
+				op := applymsg.Command.(Op)
 
-		sm.rfidx = applymsg.Index
+				sm.rfidx = applymsg.Index
 
-		if val, ok := sm.cltsqn[op.CltId]; !ok || op.SeqNum > val {
+				if val, ok := sm.cltsqn[op.CltId]; !ok || op.SeqNum > val {
 
-			sm.cltsqn[op.CltId] = op.SeqNum
+					sm.cltsqn[op.CltId] = op.SeqNum
 
-			if op.Request == "Join" {
+					if op.Request == "Join" {
 
-				sm.CloneLastConfig()
-				for GID, servers := range op.Servers{
-					sm.configs[len(sm.configs)-1].Groups[GID] = servers
+						sm.CloneLastConfig()
+						for GID, servers := range op.Servers{
+							sm.configs[len(sm.configs)-1].Groups[GID] = servers
+						}
+						sm.LoadBalance()
+
+					} else if op.Request == "Leave" {
+
+						sm.CloneLastConfig()
+						for i := range op.GIDs {
+							delete(sm.configs[len(sm.configs)-1].Groups, op.GIDs[i])	
+						}
+						sm.InvalidGroups(op.GIDs)
+						sm.LoadBalance()
+
+					} else if op.Request == "Move" {
+
+						sm.CloneLastConfig()
+						sm.configs[len(sm.configs)-1].Shards[op.Shard] = op.GID
+
+					} else if op.Request == "Query" {
+						// dummy
+					}	
 				}
-				sm.LoadBalance()
-
-			} else if op.Request == "Leave" {
-
-				sm.CloneLastConfig()
-				for i := range op.GIDs {
-					delete(sm.configs[len(sm.configs)-1].Groups, op.GIDs[i])	
-				}
-				sm.InvalidGroups(op.GIDs)
-				sm.LoadBalance()
-
-			} else if op.Request == "Move" {
-
-				sm.CloneLastConfig()
-				sm.configs[len(sm.configs)-1].Shards[op.Shard] = op.GID
-
-			} else if op.Request == "Query" {
-				// dummy
+				sm.mu.Unlock()
 			}
-			
-		}
-
-		sm.mu.Unlock()
 	}
 }
 
@@ -291,7 +297,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 //
 func (sm *ShardMaster) Kill() {
 	sm.rf.Kill()
-	// Your code here, if desired.
+	close(sm.killIt)
 }
 
 // needed by shardkv tester
@@ -329,6 +335,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	sm.rfidx = 0
 	sm.cltsqn = make(map[int64]int64)
+
+	sm.killIt = make(chan bool)
 
 	go sm.ApplyDb()
 

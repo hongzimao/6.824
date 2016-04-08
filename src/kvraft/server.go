@@ -45,51 +45,64 @@ type RaftKV struct {
 	kvdb    map[string]string
 	rfidx   int 
 	cltsqn  map[int64]int64  // sequence number log for each client
+
+	// close goroutine
+	killIt chan bool
 }
 
 func (kv *RaftKV) ApplyDb() {
 	for{
-		applymsg := <- kv.applyCh
-		
-		kv.mu.Lock()
+		select {
+			case <- kv.killIt:
+				return
+			default:
+				applymsg := <- kv.applyCh
+				
+				kv.mu.Lock()
 
-		if applymsg.UseSnapshot {
+				if applymsg.UseSnapshot {
 
-			r := bytes.NewBuffer(applymsg.Snapshot)
-			d := gob.NewDecoder(r)
-			d.Decode(&kv.kvdb)
-			d.Decode(&kv.rfidx)
-			d.Decode(&kv.cltsqn)
+					r := bytes.NewBuffer(applymsg.Snapshot)
+					d := gob.NewDecoder(r)
+					d.Decode(&kv.kvdb)
+					d.Decode(&kv.rfidx)
+					d.Decode(&kv.cltsqn)
 
-		} else {
-			op := applymsg.Command.(Op)
+				} else {
+					op := applymsg.Command.(Op)
 
-			kv.rfidx = applymsg.Index
+					kv.rfidx = applymsg.Index
 
-			if val, ok := kv.cltsqn[op.CltId]; !ok || op.SeqNum > val {
+					if val, ok := kv.cltsqn[op.CltId]; !ok || op.SeqNum > val {
 
-				kv.cltsqn[op.CltId] = op.SeqNum
-				if op.Request == "Put" {
-					kv.kvdb[op.Key] = op.Value
-				} else if op.Request == "Append" {
-					kv.kvdb[op.Key] += op.Value
-				} else if op.Request == "Get" {
-					// dummy
+						kv.cltsqn[op.CltId] = op.SeqNum
+						if op.Request == "Put" {
+							kv.kvdb[op.Key] = op.Value
+						} else if op.Request == "Append" {
+							kv.kvdb[op.Key] += op.Value
+						} else if op.Request == "Get" {
+							// dummy
+						}
+					}
 				}
-			}
-		}
 
-		kv.mu.Unlock()
+				kv.mu.Unlock()
+			}
 	}
 }
 
 func (kv *RaftKV) CheckSnapshot() {
 	for {
-		time.Sleep( LogLenCheckerTimeout * time.Millisecond) 
+		select {
+			case <- kv.killIt:
+				return
+			default:
+				time.Sleep( LogLenCheckerTimeout * time.Millisecond) 
 
-		if float64(kv.rf.GetStateSize()) / float64(kv.maxraftstate) > MaxRaftFactor {
-			
-			kv.SaveSnapshot()
+				if float64(kv.rf.GetStateSize()) / float64(kv.maxraftstate) > MaxRaftFactor {
+					
+					kv.SaveSnapshot()
+				}
 		}
 	}
 }
@@ -169,7 +182,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 //
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
-	// Your code here, if desired.
+	close(kv.killIt)
 }
 
 //
@@ -206,6 +219,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.kvdb = make(map[string]string)
 	kv.rfidx = 0
 	kv.cltsqn = make(map[int64]int64)
+
+	kv.killIt = make(chan bool)
 
 	kv.ReadSnapshot(persister.ReadSnapshot())
 
