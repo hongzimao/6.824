@@ -365,13 +365,16 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		reply.Success = true
 		// things in snapshot is guaranteed to be committed
 		// can roll back to the leader's latest nextIndex
+		rf.Logs = rf.Logs[0:1]
+		for _, log := range args.Entries {
+			if log.Index > rf.lastIncludedIndex {
+				rf.Logs = append(rf.Logs, log)
+			}
+		}
 	} else if rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term != args.PrevLogTerm { // logs don't match
 		reply.Success = false
 		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex) + 1
 		// previousTermIdx will be 0 if hitting the snapshot
-	} else if args.PrevLogIndex == 0 { // reach empty 
-		reply.Success = true
-		rf.Logs = append(rf.Logs[0:1], args.Entries...)
 	} else {
 		reply.Success = true
 		rf.Logs = rf.Logs[:args.PrevLogIndex - rf.Logs[0].Index + 1] // remove all unmatched
