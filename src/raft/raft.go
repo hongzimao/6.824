@@ -24,7 +24,7 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
-	// "fmt"
+	"fmt"
 	)
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -141,6 +141,7 @@ func (rf *Raft) becomesLeader() { // has lock already
 		rf.matchIndex[i] = 0
 	}
 	go rf.broadcastAppendEntries()
+	fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
 }
 
 func (rf *Raft) updateCommitIndex() { // has lock already
@@ -667,6 +668,8 @@ func (rf *Raft) ElectionTimeout() {
 						}
 					}
 				}
+
+				fmt.Println("reqVote", "id", rf.me, "term", rf.currentTerm, "vote got", voteCount, "out of", len(rf.peers), "candidate?", stillCandidate)
 
 				if stillCandidate && 
 				   (2 * voteCount) > len(rf.peers) {
