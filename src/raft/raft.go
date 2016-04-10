@@ -668,8 +668,6 @@ func (rf *Raft) ElectionTimeout() {
 					}
 				}
 
-				// fmt.Println("term", rf.currentTerm, "id", rf.me, "candidate?", stillCandidate, "vote", voteCount)
-
 				if stillCandidate && 
 				   (2 * voteCount) > len(rf.peers) {
 						rf.becomesLeader() 
