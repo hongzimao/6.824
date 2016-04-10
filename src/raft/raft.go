@@ -62,12 +62,11 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	elecTimer int64 // the start point of election timeout
+	elecTimer *time.Timer
 
 	currentTerm int 
 	isLeader bool 
 	voteFor int
-	voteTerm int // which term the voteFor is
 
 	Logs []Log
 	applyCh chan ApplyMsg
@@ -116,6 +115,10 @@ func randIntRange(min, max int) int{
 
 func lastLog(Logs []Log) Log {
 	return Logs[len(Logs) - 1]
+}
+
+func (rf *Raft) resetTimer(){ // no lock
+	rf.elecTimer.Reset(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax))* time.Millisecond)
 }
 
 func (rf *Raft) backToFollower() { // has lock already
@@ -310,41 +313,41 @@ type InstallSnapshotReply struct {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		rf.mu.Unlock()
 		return
 	} 
 
 	if args.Term > rf.currentTerm {
 		rf.backToFollower()
+		rf.currentTerm = args.Term
+		rf.voteFor = -1  // void
+		rf.persist()
 	}
 
-	rf.currentTerm = args.Term
 	reply.Term = args.Term 
 	reply.VoteGranted = false
 
-	if (rf.voteTerm < args.Term) || 
-	   ( rf.voteTerm == args.Term && rf.voteFor == args.CandidateId) {
+	if (rf.voteFor == -1 || rf.voteFor == args.CandidateId) {
 		if (lastLog(rf.Logs).Term < args.LastLogTerm) ||
 		   (lastLog(rf.Logs).Term == args.LastLogTerm && lastLog(rf.Logs).Index <= args.LastLogIndex) {
 			rf.voteFor = args.CandidateId
-			rf.voteTerm = args.Term
 			reply.VoteGranted = true
 
-			rf.elecTimer = time.Now().UnixNano() // reset timer
+			rf.persist()
+
+			rf.resetTimer()
 		} 
 	}	
-
-	rf.persist()
-
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply){
 
 	rf.mu.Lock()
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -355,13 +358,18 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.backToFollower()
+		rf.persist()
 	}
 
 	reply.Term = rf.currentTerm
+
 	if lastLog(rf.Logs).Index < args.PrevLogIndex { // leader has longer log
+
 	   	reply.Success = false
 	   	reply.NextIdxToSend = lastLog(rf.Logs).Index + 1
+
 	} else if args.PrevLogIndex < rf.lastIncludedIndex { // in snapshot 
+
 		reply.Success = true
 		// things in snapshot is guaranteed to be committed
 		// can roll back to the leader's latest nextIndex
@@ -371,14 +379,21 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 				rf.Logs = append(rf.Logs, log)
 			}
 		}
+		rf.persist()
+
 	} else if rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term != args.PrevLogTerm { // logs don't match
+
 		reply.Success = false
 		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex) + 1
 		// previousTermIdx will be 0 if hitting the snapshot
+
 	} else {
+
 		reply.Success = true
 		rf.Logs = rf.Logs[:args.PrevLogIndex - rf.Logs[0].Index + 1] // remove all unmatched
 		rf.Logs = append(rf.Logs, args.Entries...)
+
+		rf.persist()
 	}
 
 	if reply.Success && 
@@ -387,10 +402,8 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	}
 
 	rf.applyStateMachine()
-
-	rf.persist()
 	
-	rf.elecTimer = time.Now().UnixNano() // reset timer
+	rf.resetTimer()
 
 	rf.mu.Unlock()
 }
@@ -408,6 +421,7 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		rf.persist()
 		rf.backToFollower()
 	}
 
@@ -415,26 +429,32 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.persist()
 
 	if lastLog(rf.Logs).Index > args.LastIncludedIndex &&
 	   args.LastIncludedIndex >= rf.Logs[0].Index &&
 	   args.LastIncludedTerm == (rf.Logs[args.LastIncludedIndex - rf.Logs[0].Index].Term) {
 	   	
 	   	rf.Logs = rf.Logs[ args.LastIncludedIndex - rf.Logs[0].Index : ]
+	   	rf.persist()
 
 	} else {
 		
 		rf.Logs = append([]Log{}, Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm})
+		rf.persist()
 	}
 
-	rf.commitIndex = rf.lastIncludedIndex
-	rf.lastApplied = rf.lastIncludedIndex
+	if rf.commitIndex < rf.lastIncludedIndex {
+		rf.commitIndex = rf.lastIncludedIndex
+	}
+
+	if rf.lastApplied < rf.lastIncludedIndex {
+		rf.lastApplied = rf.lastIncludedIndex
+	}
 
 	applyMsg := ApplyMsg{UseSnapshot: true, Snapshot:args.Data}
 
 	rf.applyCh <- applyMsg
-
-	rf.persist()
 }
 
 // --------------------------------------------------------------------
@@ -484,7 +504,7 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				if !rf.isLeader {
 					rf.mu.Unlock()			
-					break
+					return
 				}
 
 				for i := 0; i < len(rf.peers); i++ {
@@ -521,13 +541,11 @@ func (rf *Raft) broadcastAppendEntries() {
 
 						} else {
 
-							var args AppendEntriesArgs
-							args.Term = rf.currentTerm
-							args.LeaderId = rf.me
-							args.LeaderCommit = rf.commitIndex
-
-							args.PrevLogIndex = rf.nextIndex[i] - 1
-							args.PrevLogTerm = rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term
+							args := AppendEntriesArgs{Term: rf.currentTerm,
+													  LeaderId: rf.me,
+													  LeaderCommit: rf.commitIndex,
+													  PrevLogIndex: rf.nextIndex[i] - 1,
+													  PrevLogTerm: rf.Logs[rf.nextIndex[i] - 1 - rf.Logs[0].Index].Term}
 
 							if lastLog(rf.Logs).Index < rf.nextIndex[i] { // heartbeat
 								args.Entries = []Log{}
@@ -567,7 +585,6 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 				}
 				rf.updateCommitIndex()
-				rf.persist()
 				rf.applyStateMachine()
 				rf.mu.Unlock()
 			}
@@ -579,89 +596,88 @@ func (rf *Raft) ElectionTimeout() {
 		select {
 			case <- rf.killIt:
 				return
-			default:
-				timeout := randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax) // 150 ~ 300 ms
-				time.Sleep(time.Duration(timeout) * time.Millisecond)
-
-				rf.mu.Lock()
+			case <- rf.elecTimer.C:
 
 				if rf.isLeader{
-					rf.mu.Unlock()
-					break
+					return
 				}
 
-				if (time.Now().UnixNano() - rf.elecTimer) >= int64(timeout * 1e6) {	
-					rf.currentTerm += 1 // change to candidate, term +1
+				rf.resetTimer()
 
-					rf.elecTimer = time.Now().UnixNano() // reset timer
-					rf.voteFor = rf.me // vote for itself
-					rf.voteTerm = rf.currentTerm // because it votes for itself
+				rf.mu.Lock()
+			
+				rf.voteFor = rf.me // vote for itself
+				rf.currentTerm += 1 // change to candidate, term +1
 
-					args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLog(rf.Logs).Index, LastLogTerm: lastLog(rf.Logs).Term}
+				rf.persist()
 
-					reqVoteChann := make (chan *RequestVoteReply, len(rf.peers)-1) // all other servers
+				args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLog(rf.Logs).Index, LastLogTerm: lastLog(rf.Logs).Term}
 
-					for i := 0; i < len(rf.peers); i++ {
+				reqVoteChann := make (chan *RequestVoteReply, len(rf.peers)-1) // all other servers
 
-						if i != rf.me { // RPC other servers
+				for i := 0; i < len(rf.peers); i++ {
 
-							go func(i int){
+					if i != rf.me { // RPC other servers
 
-								ldch := make(chan bool) // for RPC timeout
-								reply := &RequestVoteReply{}
+						go func(i int){
 
-								go func(i int, args RequestVoteArgs) {
-									ldch <- rf.sendRequestVote(i, args, reply)
-								}(i, args)
+							ldch := make(chan bool) // for RPC timeout
+							reply := &RequestVoteReply{}
 
-								select{
-									case <- ldch: // RPC return 
-										reply.Ok = true
-									case <- time.After(receiveVoteTimeout * time.Millisecond): // RPC timeout
-										reply.Ok = false
-								}
-								reqVoteChann <- reply
-							
-							}(i)
+							go func(i int, args RequestVoteArgs) {
+								ldch <- rf.sendRequestVote(i, args, reply)
+							}(i, args)
+
+							select{
+								case <- ldch: // RPC return 
+									reply.Ok = true
+								case <- time.After(receiveVoteTimeout * time.Millisecond): // RPC timeout
+									reply.Ok = false
+							}
+							reqVoteChann <- reply
+						
+						}(i)
+					}
+				}
+
+				// count votes
+				voteCount := 1 // always vote for itself
+				stillCandidate := true
+
+				for i := 0; i < len(rf.peers)-1 ; i++ { // all other servers
+
+					reply := <- reqVoteChann // reqVote channel out
+					
+					if reply.Ok {
+						
+						if rf.currentTerm > args.Term { // new election already begins
+							stillCandidate = false
+							break
+						}
+
+						if reply.Term > rf.currentTerm {
+							rf.currentTerm = reply.Term // adapt to larger term
+							rf.persist()
+							stillCandidate = false
+							break
+						}
+
+						if reply.VoteGranted {
+							voteCount += 1
 						}
 					}
-
-					// count votes
-					voteCount := 1 // always vote for itself
-					stillCandidate := true
-
-					for i := 0; i < len(rf.peers)-1 ; i++ { // all other servers
-
-						reply := <- reqVoteChann // reqVote channel out
-						
-						if reply.Ok {
-							
-							if rf.currentTerm > args.Term { // new election begins
-								stillCandidate = false
-								break
-							}
-
-							if reply.Term > rf.currentTerm {
-								rf.currentTerm = reply.Term // adapt to larger term
-								rf.persist()
-								stillCandidate = false
-								break
-							}
-
-							if reply.VoteGranted {
-								voteCount += 1
-							}
-
-							if stillCandidate && (2 * voteCount) > len(rf.peers) {
-								rf.becomesLeader()
-								break
-							}
-						}
-					} 
-					rf.persist()
 				}
 
-				rf.mu.Unlock()
+				// fmt.Println("term", rf.currentTerm, "id", rf.me, "candidate?", stillCandidate, "vote", voteCount)
+
+				if stillCandidate && 
+				   (2 * voteCount) > len(rf.peers) {
+						rf.becomesLeader() 
+						rf.mu.Unlock()
+						return
+				}
+			
+				rf.mu.Unlock()	
 		}
 	}
 }
@@ -731,13 +747,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialization from scratch
 
-	rf.elecTimer = time.Now().UnixNano()
+	rf.elecTimer = time.NewTimer(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax)) * time.Millisecond)
 
 	rf.mu.Lock()
 
 	rf.currentTerm = -1
 	rf.voteFor = -1 // nil
-	rf.voteTerm = -1
 	rf.isLeader = false
 
 	rf.lastIncludedIndex = 0
