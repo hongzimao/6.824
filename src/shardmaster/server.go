@@ -6,6 +6,7 @@ import "labrpc"
 import "sync"
 import "encoding/gob"
 import "time"
+import "reflect"
 // import "fmt"
 
 const LogLenCheckerTimeout = 50 
@@ -14,6 +15,12 @@ const MaxRaftFactor = 0.8
 
 const VOIDGID = 0
 
+const ResChanSize = 1
+const ResChanTimeout = 1000
+
+type ReplyRes struct {
+	InOp    Op
+}
 
 type ShardMaster struct {
 	mu      sync.Mutex
@@ -26,8 +33,19 @@ type ShardMaster struct {
 
 	configs []Config // indexed by config num
 
+	chanMapMu  sync.Mutex
+	resChanMap map [int] chan ReplyRes // communication from applyDb to clients
+
 	// close goroutine
 	killIt chan bool
+}
+
+func (sm *ShardMaster) createResChan(cmtidx int) {
+	sm.chanMapMu.Lock()
+	if sm.resChanMap[cmtidx] == nil {
+		sm.resChanMap[cmtidx] = make(chan ReplyRes, ResChanSize)
+	}
+	sm.chanMapMu.Unlock()
 }
 
 func (sm *ShardMaster) CloneLastConfig() {
@@ -156,7 +174,7 @@ func (sm *ShardMaster) ApplyDb() {
 
 				op := applymsg.Command.(Op)
 
-				sm.rfidx = applymsg.Index
+				sm.createResChan(applymsg.Index)
 
 				if val, ok := sm.cltsqn[op.CltId]; !ok || op.SeqNum > val {
 
@@ -188,6 +206,16 @@ func (sm *ShardMaster) ApplyDb() {
 						// dummy
 					}	
 				}
+
+				select{
+					case <- sm.resChanMap[applymsg.Index]:
+						// flush the channel
+					default:
+						// no need to flush
+				}
+
+				sm.resChanMap[applymsg.Index] <- ReplyRes{InOp:op}
+
 				sm.mu.Unlock()
 			}
 	}
@@ -205,23 +233,27 @@ type Op struct {
 	SeqNum  int64
 }
 
-
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	op := Op{Request: "Join", Servers: args.Servers, CltId:args.CltId, SeqNum: args.SeqNum}
 	
 	cmtidx, _, isLeader := sm.rf.Start(op)
 
-	reply.WrongLeader = false
-	for{ // wait to store in raft log
-		if !isLeader {
+	if !isLeader{
+		reply.WrongLeader = true
+		return
+	}
+
+	sm.createResChan(cmtidx)
+
+	select{
+		case res := <- sm.resChanMap[cmtidx]:
+			if reflect.DeepEqual(op, res.InOp) {
+				// dummy
+			} else{
+				reply.WrongLeader = true
+			}
+		case <- time.After(ResChanTimeout * time.Millisecond): // RPC timeout
 			reply.WrongLeader = true
-			break
-		} else if sm.rfidx >= cmtidx {
-			// in log already
-			break 
-		}
-		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
-		_, isLeader = sm.rf.GetState()
 	}
 }
 
@@ -230,17 +262,22 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	
 	cmtidx, _, isLeader := sm.rf.Start(op)
 
-	reply.WrongLeader = false
-	for{ // wait to store in raft log
-		if !isLeader {
+	if !isLeader{
+		reply.WrongLeader = true
+		return
+	}
+
+	sm.createResChan(cmtidx)
+
+	select{
+		case res := <- sm.resChanMap[cmtidx]:
+			if reflect.DeepEqual(op, res.InOp) {
+				// dummy
+			} else{
+				reply.WrongLeader = true
+			}
+		case <- time.After(ResChanTimeout * time.Millisecond): // RPC timeout
 			reply.WrongLeader = true
-			break
-		} else if sm.rfidx >= cmtidx {
-			// in log already
-			break 
-		}
-		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
-		_, isLeader = sm.rf.GetState()
 	}
 }
 
@@ -249,17 +286,22 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	
 	cmtidx, _, isLeader := sm.rf.Start(op)
 
-	reply.WrongLeader = false
-	for{ // wait to store in raft log
-		if !isLeader {
+	if !isLeader{
+		reply.WrongLeader = true
+		return
+	}
+
+	sm.createResChan(cmtidx)
+
+	select{
+		case res := <- sm.resChanMap[cmtidx]:
+			if reflect.DeepEqual(op, res.InOp) {
+				// dummy
+			} else{
+				reply.WrongLeader = true
+			}
+		case <- time.After(ResChanTimeout * time.Millisecond): // RPC timeout
 			reply.WrongLeader = true
-			break
-		} else if sm.rfidx >= cmtidx {
-			// in log already
-			break 
-		}
-		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
-		_, isLeader = sm.rf.GetState()
 	}
 }
 
@@ -268,23 +310,27 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	
 	cmtidx, _, isLeader := sm.rf.Start(op)
 
-	reply.WrongLeader = false
-	for{ // wait to store in raft log
-		if !isLeader {
-			reply.WrongLeader = true
-			break
-		} else if sm.rfidx >= cmtidx {
+	if !isLeader{
+		reply.WrongLeader = true
+		return
+	}
+	
+	sm.createResChan(cmtidx)
 
-			if args.Num == -1 || args.Num >= len(sm.configs) {
-				// config always non-empty
-				reply.Config = sm.LastConfig()
-			} else {
-				reply.Config = sm.configs[args.Num]
+	select{
+		case res := <- sm.resChanMap[cmtidx]:
+			if reflect.DeepEqual(op, res.InOp) {
+				if args.Num == -1 || args.Num >= len(sm.configs) {
+					// config always non-empty
+					reply.Config = sm.LastConfig()
+				} else {
+					reply.Config = sm.configs[args.Num]
+				}
+			} else{
+				reply.WrongLeader = true
 			}
-			break
-		}
-		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
-		_, isLeader = sm.rf.GetState()
+		case <- time.After(ResChanTimeout * time.Millisecond): // RPC timeout
+			reply.WrongLeader = true
 	}
 }
 
@@ -335,6 +381,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	sm.rfidx = 0
 	sm.cltsqn = make(map[int64]int64)
+
+	sm.resChanMap = make(map [int] chan ReplyRes)
 
 	sm.killIt = make(chan bool)
 
