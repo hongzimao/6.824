@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 	"bytes"
+	"reflect"
 	// "fmt"
 )
 
@@ -182,7 +183,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 	select{
 		case res := <- kv.resChanMap[cmtidx]:
-			if res.InOp == op {
+			if reflect.DeepEqual(op, res.InOp) {
 				reply.Value = res.Value
 			} else{
 				reply.WrongLeader = true
@@ -207,7 +208,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	select{
 		case res := <- kv.resChanMap[cmtidx]:
-			if res.InOp == op {
+			if reflect.DeepEqual(op, res.InOp) {
 				// dummy
 			} else{
 				reply.WrongLeader = true
