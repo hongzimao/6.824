@@ -63,6 +63,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	elecTimer *time.Timer
+	hbTimer *time.Timer
 
 	currentTerm int 
 	isLeader bool 
@@ -405,6 +406,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	rf.applyStateMachine()
 	
 	rf.resetTimer()
+	// fmt.Println("receive appendEntries", "id", rf.me, "term", rf.currentTerm, "from leader", args.LeaderId)
 
 	rf.mu.Unlock()
 }
@@ -497,9 +499,9 @@ func (rf *Raft) broadcastAppendEntries() {
 		select {
 			case <- rf.killIt:
 				return
-			default:
+			case <- rf.hbTimer.C:
 
-				time.Sleep( appendEntriesTimeout * time.Millisecond) 
+				rf.hbTimer.Reset(time.Duration(appendEntriesTimeout)* time.Millisecond)
 
 				rf.mu.Lock()
 
@@ -749,6 +751,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialization from scratch
 
 	rf.elecTimer = time.NewTimer(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax)) * time.Millisecond)
+	rf.hbTimer = time.NewTimer(time.Duration(appendEntriesTimeout)* time.Millisecond)
 
 	rf.mu.Lock()
 
