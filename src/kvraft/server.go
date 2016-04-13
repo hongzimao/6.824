@@ -17,6 +17,8 @@ const LogLenCheckerTimeout = 50
 const ClientRPCTimeout = 50
 const MaxRaftFactor = 0.8
 
+const ResChanSize = 1
+const ResChanTimeout = 1000
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -34,6 +36,11 @@ type Op struct {
 	SeqNum  int64
 }
 
+type ReplyRes struct {
+	Value   string 
+	InOp    Op
+}
+
 type RaftKV struct {
 	mu      sync.Mutex
 	me      int
@@ -46,8 +53,21 @@ type RaftKV struct {
 	rfidx   int 
 	cltsqn  map[int64]int64  // sequence number log for each client
 
+	chanMapMu  sync.Mutex
+	resChanMap map [int] chan ReplyRes // communication from applyDb to clients
+
+	loglenTimer *time.Timer
+
 	// close goroutine
 	killIt chan bool
+}
+
+func (kv *RaftKV) createResChan(cmtidx int) {
+	kv.chanMapMu.Lock()
+	if kv.resChanMap[cmtidx] == nil {
+		kv.resChanMap[cmtidx] = make(chan ReplyRes, ResChanSize)
+	}
+	kv.chanMapMu.Unlock()
 }
 
 func (kv *RaftKV) ApplyDb() {
@@ -57,7 +77,7 @@ func (kv *RaftKV) ApplyDb() {
 				return
 			default:
 				applymsg := <- kv.applyCh
-				
+
 				kv.mu.Lock()
 
 				if applymsg.UseSnapshot {
@@ -73,6 +93,8 @@ func (kv *RaftKV) ApplyDb() {
 
 					kv.rfidx = applymsg.Index
 
+					kv.createResChan(applymsg.Index)
+
 					if val, ok := kv.cltsqn[op.CltId]; !ok || op.SeqNum > val {
 
 						kv.cltsqn[op.CltId] = op.SeqNum
@@ -84,6 +106,15 @@ func (kv *RaftKV) ApplyDb() {
 							// dummy
 						}
 					}
+
+					select{
+						case <- kv.resChanMap[applymsg.Index]:
+							// flush the channel
+						default:
+							// no need to flush
+					}
+
+					kv.resChanMap[applymsg.Index] <- ReplyRes{Value:kv.kvdb[op.Key], InOp:op}
 				}
 
 				kv.mu.Unlock()
@@ -96,8 +127,9 @@ func (kv *RaftKV) CheckSnapshot() {
 		select {
 			case <- kv.killIt:
 				return
-			default:
-				time.Sleep( LogLenCheckerTimeout * time.Millisecond) 
+			case <- kv.loglenTimer.C:
+				
+				kv.loglenTimer.Reset(time.Duration(LogLenCheckerTimeout)* time.Millisecond)
 
 				if float64(kv.rf.GetStateSize()) / float64(kv.maxraftstate) > MaxRaftFactor {
 					
@@ -141,17 +173,22 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	
 	cmtidx, _, isLeader := kv.rf.Start(op)
 
-	reply.WrongLeader = false
-	for{ // wait to store in raft log
-		if !isLeader {
+	if !isLeader{
+		reply.WrongLeader = true
+		return
+	}
+
+	kv.createResChan(cmtidx)
+
+	select{
+		case res := <- kv.resChanMap[cmtidx]:
+			if res.InOp == op {
+				reply.Value = res.Value
+			} else{
+				reply.WrongLeader = true
+			}
+		case <- time.After(ResChanTimeout * time.Millisecond): // RPC timeout
 			reply.WrongLeader = true
-			break
-		} else if kv.rfidx >= cmtidx {
-			reply.Value = kv.kvdb[args.Key]
-			break // in log already
-		}
-		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
-		_, isLeader = kv.rf.GetState()
 	}
 }
 
@@ -161,16 +198,22 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	cmtidx, _, isLeader := kv.rf.Start(op)
 
-	reply.WrongLeader = false
-	for{ // wait to store in raft log
-		if !isLeader {
+	if !isLeader{
+		reply.WrongLeader = true
+		return
+	}
+
+	kv.createResChan(cmtidx)
+
+	select{
+		case res := <- kv.resChanMap[cmtidx]:
+			if res.InOp == op {
+				// dummy
+			} else{
+				reply.WrongLeader = true
+			}
+		case <- time.After(ResChanTimeout * time.Millisecond): // RPC timeout
 			reply.WrongLeader = true
-			break
-		} else if kv.rfidx >= cmtidx {
-			break // in log already
-		}
-		time.Sleep( ClientRPCTimeout * time.Millisecond) // appendEntries timeout
-		_, isLeader = kv.rf.GetState()
 	}
 }
 
@@ -211,8 +254,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// Your initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
@@ -220,11 +261,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rfidx = 0
 	kv.cltsqn = make(map[int64]int64)
 
+	kv.resChanMap = make(map [int] chan ReplyRes)
+
 	kv.killIt = make(chan bool)
 
 	kv.ReadSnapshot(persister.ReadSnapshot())
 
 	go kv.ApplyDb()
+
+	kv.loglenTimer = time.NewTimer(time.Duration(LogLenCheckerTimeout)* time.Millisecond)
 
 	go kv.CheckSnapshot()
 
