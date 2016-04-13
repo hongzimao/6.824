@@ -24,7 +24,7 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
-	"fmt"
+	// "fmt"
 	)
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -32,10 +32,11 @@ import (
 // tester) on the same server, via the applyCh passed to Make().
 //
 
-const appendEntriesTimeout = 50
 const receiveVoteTimeout = 100
+const LeaderRPCTimeout = 20
 const requestVoteTimeoutMin = 150
 const requestVoteTimeoutMax = 300
+const appendEntriesTimeout = 50
 
 type ApplyMsg struct {
 	Index       int
@@ -118,9 +119,13 @@ func lastLog(Logs []Log) Log {
 	return Logs[len(Logs) - 1]
 }
 
-func (rf *Raft) resetTimer(){ // no lock
+func (rf *Raft) resetElecTimer(){ // no lock
 	rf.elecTimer.Reset(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax))* time.Millisecond)
 }
+
+func (rf *Raft) resetHbTimer(){ // no lock
+ 	rf.hbTimer.Reset(time.Duration(appendEntriesTimeout)* time.Millisecond)
+ }
 
 func (rf *Raft) backToFollower() { // has lock already
 	if rf.isLeader {
@@ -142,7 +147,7 @@ func (rf *Raft) becomesLeader() { // has lock already
 		rf.matchIndex[i] = 0
 	}
 	go rf.broadcastAppendEntries()
-	fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
+	// fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
 }
 
 func (rf *Raft) updateCommitIndex() { // has lock already
@@ -292,6 +297,10 @@ type AppendEntriesReply struct {
 	Success bool
 	NextIdxToSend int
 	Ok bool
+	Id int
+
+	ArgsTerm int
+	LogLenSent int
 }
 
 type InstallSnapshotArgs struct {
@@ -304,6 +313,8 @@ type InstallSnapshotArgs struct {
 
 type InstallSnapshotReply struct {
 	Term int
+	Ok bool
+	Id int
 }
 
 // --------------------------------------------------------------------
@@ -341,7 +352,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 			rf.persist()
 
-			rf.resetTimer()
+			rf.resetElecTimer()
 		} 
 	}	
 }
@@ -405,7 +416,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	rf.applyStateMachine()
 	
-	rf.resetTimer()
+	rf.resetElecTimer()
 	// fmt.Println("receive appendEntries", "id", rf.me, "term", rf.currentTerm, "from leader", args.LeaderId)
 
 	rf.mu.Unlock()
@@ -501,7 +512,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				return
 			case <- rf.hbTimer.C:
 
-				rf.hbTimer.Reset(time.Duration(appendEntriesTimeout)* time.Millisecond)
+				rf.resetHbTimer()
 
 				rf.mu.Lock()
 
@@ -509,6 +520,9 @@ func (rf *Raft) broadcastAppendEntries() {
 					rf.mu.Unlock()			
 					return
 				}
+
+				installSnapshotChan := make (chan *InstallSnapshotReply, len(rf.peers)-1) // all other servers
+				appendEntriesChan := make (chan *AppendEntriesReply, len(rf.peers)-1) // all other servers
 
 				for i := 0; i < len(rf.peers); i++ {
 					if i != rf.me { // RPC other servers
@@ -522,24 +536,23 @@ func (rf *Raft) broadcastAppendEntries() {
 														LastIncludedTerm: rf.lastIncludedTerm, 
 														Data: rf.persister.ReadSnapshot()}
 
-							go func(j int, args InstallSnapshotArgs) {
+							go func(i int, args InstallSnapshotArgs){
+								ldch := make(chan bool) // for RPC timeout
 								reply := &InstallSnapshotReply{}
-								ok := rf.sendInstallSnapshot(j, args, reply)
 
-								if ok {
-									rf.mu.Lock()
-									defer rf.mu.Unlock()
+								go func(j int, args InstallSnapshotArgs) {
+									ldch <- rf.sendInstallSnapshot(j, args, reply)
+								}(i, args)
 
-									if reply.Term > rf.currentTerm {
-										rf.currentTerm = reply.Term
-										rf.backToFollower()
-										rf.persist()
-										return 
-									} else {
-										rf.nextIndex[j] = lastLog(rf.Logs).Index + 1 
-									}
-
+								select{
+									case ok := <- ldch: // RPC return 
+										reply.Ok = ok
+										reply.Id = i
+									case <- time.After(LeaderRPCTimeout * time.Millisecond): // RPC timeout
+										reply.Ok = false
 								}
+
+								installSnapshotChan <- reply
 							}(i, args)
 
 						} else {
@@ -555,13 +568,53 @@ func (rf *Raft) broadcastAppendEntries() {
 							} else { // user command
 								args.Entries = rf.Logs[rf.nextIndex[i] - rf.Logs[0].Index : ]
 							}
-
-							go func(j int, args AppendEntriesArgs) {
+							
+							go func(i int, args AppendEntriesArgs){
+								ldch := make(chan bool) // for RPC timeout
 								reply := &AppendEntriesReply{}
-								reply.Ok = rf.sendAppendEntries(j, args, reply)
 
-								if reply.Ok {
-									rf.mu.Lock()
+								go func(j int, args AppendEntriesArgs) {
+									ldch <- rf.sendAppendEntries(j, args, reply)
+								}(i, args)
+
+								select{
+									case ok := <- ldch: // RPC return 
+										reply.Ok = ok
+										reply.Id = i
+										reply.ArgsTerm = args.Term
+										reply.LogLenSent = args.PrevLogIndex + len(args.Entries)
+									case <- time.After(LeaderRPCTimeout * time.Millisecond): // RPC timeout
+										reply.Ok = false
+								}
+
+								appendEntriesChan <- reply
+				
+							}(i, args)
+						}
+					}
+				}
+
+				for i := 0; i < len(rf.peers)-1; i++ { // no RPC for self
+					select{
+
+						case reply := <- installSnapshotChan:
+
+							if reply.Ok {
+									if reply.Term > rf.currentTerm {
+										rf.currentTerm = reply.Term
+										rf.backToFollower()
+										rf.persist()
+										rf.mu.Unlock()
+										return 
+									} else {
+										rf.nextIndex[reply.Id] = lastLog(rf.Logs).Index + 1 
+									}
+
+								}
+
+						case reply := <- appendEntriesChan:
+
+							if reply.Ok {
 									if reply.Term > rf.currentTerm { // someone has higher term
 										rf.currentTerm = reply.Term // adapt to larger term
 										rf.backToFollower()
@@ -569,24 +622,21 @@ func (rf *Raft) broadcastAppendEntries() {
 										rf.mu.Unlock()
 										return
 									} else {
-										if rf.currentTerm == args.Term { // no reordering of net pkt
+										if rf.currentTerm == reply.ArgsTerm { // no reordering of net pkt
 											if reply.Success { 
-												logLenSent := args.PrevLogIndex + len(args.Entries)
-												rf.nextIndex[j] = logLenSent + 1 
-												rf.matchIndex[j] = logLenSent
+												rf.nextIndex[reply.Id] = reply.LogLenSent + 1 
+												rf.matchIndex[reply.Id] = reply.LogLenSent
 											} else { // reply unsuccessful
-												// rf.nextIndex[j] -= 1 
-												rf.nextIndex[j] = reply.NextIdxToSend
+												// rf.nextIndex[reply.Id] -= 1 
+												rf.nextIndex[reply.Id] = reply.NextIdxToSend
 												// will retry in the next AppendEntries 
 											}
 										}
 									}
-									rf.mu.Unlock()
 								} 
-							}(i, args)
-						}
 					}
 				}
+
 				rf.updateCommitIndex()
 				rf.applyStateMachine()
 				rf.mu.Unlock()
@@ -605,7 +655,7 @@ func (rf *Raft) ElectionTimeout() {
 					return
 				}
 
-				rf.resetTimer()
+				rf.resetElecTimer()
 
 				rf.mu.Lock()
 			
@@ -632,8 +682,8 @@ func (rf *Raft) ElectionTimeout() {
 							}(i, args)
 
 							select{
-								case <- ldch: // RPC return 
-									reply.Ok = true
+								case ok := <- ldch: // RPC return 
+									reply.Ok = ok
 								case <- time.After(receiveVoteTimeout * time.Millisecond): // RPC timeout
 									reply.Ok = false
 							}
@@ -671,7 +721,7 @@ func (rf *Raft) ElectionTimeout() {
 					}
 				}
 
-				fmt.Println("reqVote", "id", rf.me, "term", rf.currentTerm, "vote got", voteCount, "out of", len(rf.peers), "candidate?", stillCandidate)
+				// fmt.Println("reqVote", "id", rf.me, "term", rf.currentTerm, "vote got", voteCount, "out of", len(rf.peers), "candidate?", stillCandidate)
 
 				if stillCandidate && 
 				   (2 * voteCount) > len(rf.peers) {
