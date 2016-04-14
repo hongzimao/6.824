@@ -130,6 +130,7 @@ func (rf *Raft) resetHbTimer(){ // no lock
 func (rf *Raft) backToFollower() { // has lock already
 	if rf.isLeader {
 			rf.isLeader = false // back to follower
+			rf.resetElecTimer()
 			go rf.ElectionTimeout()
 		}
 }
@@ -146,6 +147,8 @@ func (rf *Raft) becomesLeader() { // has lock already
 	for i := 0; i < len(rf.matchIndex); i ++ {
 		rf.matchIndex[i] = 0
 	}
+
+	rf.hbTimer.Reset(time.Duration(0) * time.Millisecond)
 	go rf.broadcastAppendEntries()
 	// fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
 }
