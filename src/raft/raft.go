@@ -32,7 +32,7 @@ import (
 // tester) on the same server, via the applyCh passed to Make().
 //
 
-const receiveVoteTimeout = 100
+const receiveVoteTimeout = 20
 const LeaderRPCTimeout = 20
 const requestVoteTimeoutMin = 150
 const requestVoteTimeoutMax = 300
@@ -130,7 +130,7 @@ func (rf *Raft) resetHbTimer(){ // no lock
 func (rf *Raft) backToFollower() { // has lock already
 	if rf.isLeader {
 			rf.isLeader = false // back to follower
-			rf.resetElecTimer()
+			rf.elecTimer.Reset(time.Duration(0)* time.Millisecond)
 			go rf.ElectionTimeout()
 		}
 }
@@ -803,7 +803,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialization from scratch
 
 	rf.elecTimer = time.NewTimer(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax)) * time.Millisecond)
-	rf.hbTimer = time.NewTimer(time.Duration(appendEntriesTimeout)* time.Millisecond)
+	rf.hbTimer = time.NewTimer(time.Duration(0)* time.Millisecond)
 
 	rf.mu.Lock()
 
