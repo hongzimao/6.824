@@ -439,8 +439,6 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 		rf.backToFollower()
 	}
 
-	rf.persister.SaveSnapshot(args.Data)
-
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.persist()
@@ -464,11 +462,12 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 
 	if rf.lastApplied < rf.lastIncludedIndex {
 		rf.lastApplied = rf.lastIncludedIndex
+
+		rf.persister.SaveSnapshot(args.Data)
+		
+		applyMsg := ApplyMsg{UseSnapshot: true, Snapshot:args.Data}
+		rf.applyCh <- applyMsg
 	}
-
-	applyMsg := ApplyMsg{UseSnapshot: true, Snapshot:args.Data}
-
-	rf.applyCh <- applyMsg
 }
 
 // --------------------------------------------------------------------
