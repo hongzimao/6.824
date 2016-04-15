@@ -195,12 +195,12 @@ func (rf *Raft) applyStateMachine() { // has lock already
 
 func (rf *Raft) previousTermIdx(PrevLogIndex int) int { // has lock already
 	termToSkip := rf.Logs[PrevLogIndex - rf.Logs[0].Index].Term
-	for i := PrevLogIndex - rf.Logs[0].Index - 1; i > 0; i -- {
+	for i := PrevLogIndex - rf.Logs[0].Index - 1; i >= 0; i -- {
 		if rf.Logs[i].Term != termToSkip {
 			return rf.Logs[i].Index
 		}
 	}
-	return 0
+	return -1  // in snapshot
 }
 
 // return currentTerm and whether this server
