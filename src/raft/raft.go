@@ -130,7 +130,7 @@ func (rf *Raft) resetHbTimer(){ // no lock
 func (rf *Raft) backToFollower() { // has lock already
 	if rf.isLeader {
 			rf.isLeader = false // back to follower
-			rf.elecTimer.Reset(time.Duration(0)* time.Millisecond)
+			rf.resetElecTimer()
 			go rf.ElectionTimeout()
 		}
 }
