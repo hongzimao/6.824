@@ -24,7 +24,8 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
-	// "fmt"
+	"fmt"
+	"runtime"
 	)
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -516,10 +517,14 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				rf.resetHbTimer()
 
+				t1 := time.Now()
+
 				rf.mu.Lock()
 
+				t2 := time.Now()
+
 				if !rf.isLeader {
-					rf.mu.Unlock()			
+					rf.mu.Unlock()
 					return
 				}
 
@@ -539,7 +544,7 @@ func (rf *Raft) broadcastAppendEntries() {
 														Data: rf.persister.ReadSnapshot()}
 
 							go func(i int, args InstallSnapshotArgs){
-								ldch := make(chan bool) // for RPC timeout
+								ldch := make(chan bool, 1) // for RPC timeout
 								reply := &InstallSnapshotReply{}
 
 								go func(j int, args InstallSnapshotArgs) {
@@ -572,7 +577,7 @@ func (rf *Raft) broadcastAppendEntries() {
 							}
 							
 							go func(i int, args AppendEntriesArgs){
-								ldch := make(chan bool) // for RPC timeout
+								ldch := make(chan bool, 1) // for RPC timeout
 								reply := &AppendEntriesReply{}
 
 								go func(j int, args AppendEntriesArgs) {
@@ -640,8 +645,23 @@ func (rf *Raft) broadcastAppendEntries() {
 				}
 
 				rf.updateCommitIndex()
+
+				t3 := time.Now()
+
 				rf.applyStateMachine()
+
+				t4 := time.Now()
+
 				rf.mu.Unlock()
+
+				t5 := time.Now()
+
+				// fmt.Println(runtime.NumGoroutine())
+
+				if t5.Sub(t1) > (50 * time.Millisecond){
+					fmt.Printf("Time elapsed in leaderRPC %v, lock: %v, applyCh: %v, unlock: %v, rest: %v. Number of Go routines: %v \n", 
+							   t5.Sub(t1), t2.Sub(t1), t4.Sub(t3), t5.Sub(t4), t3.Sub(t2), runtime.NumGoroutine())
+				}
 			}
 	}
 }
@@ -653,13 +673,16 @@ func (rf *Raft) ElectionTimeout() {
 				return
 			case <- rf.elecTimer.C:
 
-				if rf.isLeader{
-					return
-				}
-
 				rf.resetElecTimer()
 
+				t1 := time.Now()
+
 				rf.mu.Lock()
+
+				if rf.isLeader{
+					rf.mu.Unlock()			
+					return
+				}
 			
 				rf.voteFor = rf.me // vote for itself
 				rf.currentTerm += 1 // change to candidate, term +1
@@ -676,7 +699,7 @@ func (rf *Raft) ElectionTimeout() {
 
 						go func(i int){
 
-							ldch := make(chan bool) // for RPC timeout
+							ldch := make(chan bool, 1) // for RPC timeout
 							reply := &RequestVoteReply{}
 
 							go func(i int, args RequestVoteArgs) {
@@ -733,6 +756,12 @@ func (rf *Raft) ElectionTimeout() {
 				}
 			
 				rf.mu.Unlock()	
+
+				t2 := time.Now()
+
+				if t2.Sub(t1) > (150 * time.Millisecond){
+					fmt.Printf("Time elapsed in election %v \n", t2.Sub(t1))
+				}
 		}
 	}
 }
