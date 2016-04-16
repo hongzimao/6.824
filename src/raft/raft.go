@@ -24,8 +24,7 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
-	"fmt"
-	"runtime"
+	// "fmt"
 	)
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -33,7 +32,7 @@ import (
 // tester) on the same server, via the applyCh passed to Make().
 //
 
-const receiveVoteTimeout = 20
+const receiveVoteTimeout = 120
 const LeaderRPCTimeout = 20
 const requestVoteTimeoutMin = 150
 const requestVoteTimeoutMax = 300
@@ -112,7 +111,6 @@ func maxOfTwo(a, b int) int {
 }
 // random number in a range
 func randIntRange(min, max int) int{
-	// rand.Seed(time.Now().UnixNano())
 	return rand.Intn(max - min) + min
 }
 
@@ -517,11 +515,7 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				rf.resetHbTimer()
 
-				t1 := time.Now()
-
 				rf.mu.Lock()
-
-				t2 := time.Now()
 
 				if !rf.isLeader {
 					rf.mu.Unlock()
@@ -601,10 +595,19 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 				}
 
+				rf.mu.Unlock()
+
 				for i := 0; i < len(rf.peers)-1; i++ { // no RPC for self
 					select{
 
 						case reply := <- installSnapshotChan:
+
+							rf.mu.Lock()
+							
+							if !rf.isLeader {
+								rf.mu.Unlock()
+								return
+							}
 
 							if reply.Ok {
 									if reply.Term > rf.currentTerm {
@@ -619,7 +622,16 @@ func (rf *Raft) broadcastAppendEntries() {
 
 								}
 
+							rf.mu.Unlock()
+
 						case reply := <- appendEntriesChan:
+
+							rf.mu.Lock()
+							
+							if !rf.isLeader {
+								rf.mu.Unlock()
+								return
+							}
 
 							if reply.Ok {
 									if reply.Term > rf.currentTerm { // someone has higher term
@@ -641,27 +653,24 @@ func (rf *Raft) broadcastAppendEntries() {
 										}
 									}
 								} 
+
+							rf.mu.Unlock()
 					}
+				}
+
+				rf.mu.Lock()
+							
+				if !rf.isLeader {
+					rf.mu.Unlock()
+					return
 				}
 
 				rf.updateCommitIndex()
 
-				t3 := time.Now()
-
 				rf.applyStateMachine()
-
-				t4 := time.Now()
 
 				rf.mu.Unlock()
 
-				t5 := time.Now()
-
-				// fmt.Println(runtime.NumGoroutine())
-
-				if t5.Sub(t1) > (50 * time.Millisecond){
-					fmt.Printf("Time elapsed in leaderRPC %v, lock: %v, applyCh: %v, unlock: %v, rest: %v. Number of Go routines: %v \n", 
-							   t5.Sub(t1), t2.Sub(t1), t4.Sub(t3), t5.Sub(t4), t3.Sub(t2), runtime.NumGoroutine())
-				}
 			}
 	}
 }
@@ -674,8 +683,6 @@ func (rf *Raft) ElectionTimeout() {
 			case <- rf.elecTimer.C:
 
 				rf.resetElecTimer()
-
-				t1 := time.Now()
 
 				rf.mu.Lock()
 
@@ -718,6 +725,8 @@ func (rf *Raft) ElectionTimeout() {
 					}
 				}
 
+				rf.mu.Unlock()
+
 				// count votes
 				voteCount := 1 // always vote for itself
 				stillCandidate := true
@@ -727,9 +736,12 @@ func (rf *Raft) ElectionTimeout() {
 					reply := <- reqVoteChann // reqVote channel out
 					
 					if reply.Ok {
+
+						rf.mu.Lock()
 						
 						if rf.currentTerm > args.Term { // new election already begins
 							stillCandidate = false
+							rf.mu.Unlock()
 							break
 						}
 
@@ -737,16 +749,21 @@ func (rf *Raft) ElectionTimeout() {
 							rf.currentTerm = reply.Term // adapt to larger term
 							rf.persist()
 							stillCandidate = false
+							rf.mu.Unlock()
 							break
 						}
 
 						if reply.VoteGranted {
 							voteCount += 1
 						}
+
+						rf.mu.Unlock()
 					}
 				}
 
 				// fmt.Println("reqVote", "id", rf.me, "term", rf.currentTerm, "vote got", voteCount, "out of", len(rf.peers), "candidate?", stillCandidate)
+
+				rf.mu.Lock()
 
 				if stillCandidate && 
 				   (2 * voteCount) > len(rf.peers) {
@@ -756,12 +773,6 @@ func (rf *Raft) ElectionTimeout() {
 				}
 			
 				rf.mu.Unlock()	
-
-				t2 := time.Now()
-
-				if t2.Sub(t1) > (150 * time.Millisecond){
-					fmt.Printf("Time elapsed in election %v \n", t2.Sub(t1))
-				}
 		}
 	}
 }
