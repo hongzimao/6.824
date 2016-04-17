@@ -300,7 +300,6 @@ type AppendEntriesReply struct {
 	NextIdxToSend int
 	Ok bool
 	Id int
-
 	ArgsTerm int
 	LogLenSent int
 }
@@ -317,6 +316,7 @@ type InstallSnapshotReply struct {
 	Term int
 	Ok bool
 	Id int
+	ArgsTerm int
 }
 
 // --------------------------------------------------------------------
@@ -553,6 +553,7 @@ func (rf *Raft) broadcastAppendEntries() {
 										reply.Ok = false
 								}
 
+								reply.ArgsTerm = args.Term
 								installSnapshotChan <- reply
 							}(i, args)
 
@@ -582,12 +583,12 @@ func (rf *Raft) broadcastAppendEntries() {
 									case ok := <- ldch: // RPC return 
 										reply.Ok = ok
 										reply.Id = i
-										reply.ArgsTerm = args.Term
 										reply.LogLenSent = args.PrevLogIndex + len(args.Entries)
 									case <- time.After(LeaderRPCTimeout * time.Millisecond): // RPC timeout
 										reply.Ok = false
 								}
 
+								reply.ArgsTerm = args.Term
 								appendEntriesChan <- reply
 				
 							}(i, args)
@@ -604,7 +605,7 @@ func (rf *Raft) broadcastAppendEntries() {
 
 							rf.mu.Lock()
 							
-							if !rf.isLeader {
+							if !rf.isLeader || rf.currentTerm != reply.ArgsTerm{
 								rf.mu.Unlock()
 								return
 							}
@@ -628,7 +629,7 @@ func (rf *Raft) broadcastAppendEntries() {
 
 							rf.mu.Lock()
 							
-							if !rf.isLeader {
+							if !rf.isLeader || rf.currentTerm != reply.ArgsTerm{
 								rf.mu.Unlock()
 								return
 							}
@@ -641,15 +642,13 @@ func (rf *Raft) broadcastAppendEntries() {
 										rf.mu.Unlock()
 										return
 									} else {
-										if rf.currentTerm == reply.ArgsTerm { // no reordering of net pkt
-											if reply.Success { 
-												rf.nextIndex[reply.Id] = reply.LogLenSent + 1 
-												rf.matchIndex[reply.Id] = reply.LogLenSent
-											} else { // reply unsuccessful
-												// rf.nextIndex[reply.Id] -= 1 
-												rf.nextIndex[reply.Id] = reply.NextIdxToSend
-												// will retry in the next AppendEntries 
-											}
+										if reply.Success { 
+											rf.nextIndex[reply.Id] = reply.LogLenSent + 1 
+											rf.matchIndex[reply.Id] = reply.LogLenSent
+										} else { // reply unsuccessful
+											// rf.nextIndex[reply.Id] -= 1 
+											rf.nextIndex[reply.Id] = reply.NextIdxToSend
+											// will retry in the next AppendEntries 
 										}
 									}
 								} 
