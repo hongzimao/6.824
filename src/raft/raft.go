@@ -283,6 +283,7 @@ type RequestVoteReply struct {
 	Term int
 	VoteGranted bool
 	Ok bool
+	ArgsTerm int
 }
 
 type AppendEntriesArgs struct {
@@ -718,6 +719,8 @@ func (rf *Raft) ElectionTimeout() {
 								case <- time.After(receiveVoteTimeout * time.Millisecond): // RPC timeout
 									reply.Ok = false
 							}
+
+							reply.ArgsTerm = args.Term
 							reqVoteChann <- reply
 						
 						}(i)
@@ -733,16 +736,16 @@ func (rf *Raft) ElectionTimeout() {
 				for i := 0; i < len(rf.peers)-1 ; i++ { // all other servers
 
 					reply := <- reqVoteChann // reqVote channel out
+
+					rf.mu.Lock()
+							
+					if rf.isLeader || rf.currentTerm != reply.ArgsTerm{
+						stillCandidate = false
+						rf.mu.Unlock()
+						break
+					}
 					
 					if reply.Ok {
-
-						rf.mu.Lock()
-						
-						if rf.currentTerm > args.Term { // new election already begins
-							stillCandidate = false
-							rf.mu.Unlock()
-							break
-						}
 
 						if reply.Term > rf.currentTerm {
 							rf.currentTerm = reply.Term // adapt to larger term
@@ -755,9 +758,9 @@ func (rf *Raft) ElectionTimeout() {
 						if reply.VoteGranted {
 							voteCount += 1
 						}
-
-						rf.mu.Unlock()
 					}
+
+					rf.mu.Unlock()
 				}
 
 				// fmt.Println("reqVote", "id", rf.me, "term", rf.currentTerm, "vote got", voteCount, "out of", len(rf.peers), "candidate?", stillCandidate)
