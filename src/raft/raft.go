@@ -24,7 +24,7 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
-	// "fmt"
+	"fmt"
 	)
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -516,7 +516,11 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				rf.resetHbTimer()
 
+				t1 := time.Now()
+
 				rf.mu.Lock()
+
+				t2 := time.Now()
 
 				if !rf.isLeader {
 					rf.mu.Unlock()
@@ -599,6 +603,8 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				rf.mu.Unlock()
 
+				t3 := time.Now()
+
 				for i := 0; i < len(rf.peers)-1; i++ { // no RPC for self
 					select{
 
@@ -658,7 +664,11 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 				}
 
+				t4 := time.Now()
+
 				rf.mu.Lock()
+
+				t5 := time.Now()
 							
 				if !rf.isLeader {
 					rf.mu.Unlock()
@@ -670,6 +680,12 @@ func (rf *Raft) broadcastAppendEntries() {
 				rf.applyStateMachine()
 
 				rf.mu.Unlock()
+
+				t6 := time.Now()
+
+				if t6.Sub(t1) > 50 * time.Millisecond {
+					fmt.Println("Leader RPC elapsed ", t6.Sub(t1), "first lock", t2.Sub(t1), "send", t3.Sub(t2), "reply", t4.Sub(t3), "last lock", t5.Sub(t4))
+				}
 
 			}
 	}
@@ -684,7 +700,11 @@ func (rf *Raft) ElectionTimeout() {
 
 				rf.resetElecTimer()
 
+				t1 := time.Now()
+
 				rf.mu.Lock()
+
+				t2 := time.Now()
 
 				if rf.isLeader{
 					rf.mu.Unlock()			
@@ -729,6 +749,8 @@ func (rf *Raft) ElectionTimeout() {
 
 				rf.mu.Unlock()
 
+				t3 := time.Now()
+
 				// count votes
 				voteCount := 1 // always vote for itself
 				stillCandidate := true
@@ -768,9 +790,13 @@ func (rf *Raft) ElectionTimeout() {
 					rf.mu.Unlock()
 				}
 
+				t4 := time.Now()
+
 				// fmt.Println("reqVote", "id", rf.me, "term", rf.currentTerm, "vote got", voteCount, "out of", len(rf.peers), "candidate?", stillCandidate)
 
 				rf.mu.Lock()
+
+				t5 := time.Now()
 
 				if stillCandidate && 
 				   (2 * voteCount) > len(rf.peers) {
@@ -780,6 +806,12 @@ func (rf *Raft) ElectionTimeout() {
 				}
 			
 				rf.mu.Unlock()	
+
+				t6 := time.Now()
+
+				if t6.Sub(t1) > 150 * time.Millisecond {
+					fmt.Println("Election elapsed ", t6.Sub(t1), "first lock", t2.Sub(t1), "send", t3.Sub(t2), "reply", t4.Sub(t3), "last lock", t5.Sub(t4))
+				}
 		}
 	}
 }
