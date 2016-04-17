@@ -738,8 +738,13 @@ func (rf *Raft) ElectionTimeout() {
 					reply := <- reqVoteChann // reqVote channel out
 
 					rf.mu.Lock()
+
+					if rf.isLeader{
+						rf.mu.Unlock()
+						return
+					}
 							
-					if rf.isLeader || rf.currentTerm != reply.ArgsTerm{
+					if rf.currentTerm != reply.ArgsTerm{
 						stillCandidate = false
 						rf.mu.Unlock()
 						break
