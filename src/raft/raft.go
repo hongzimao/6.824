@@ -364,7 +364,7 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	rf.mu.Lock()
 
-	tl := time.Now()
+	t1 := time.Now()
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -373,11 +373,18 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		return
 	}
 
+	t2 := time.Now()
+
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.backToFollower()
 		rf.persist()
 	}
+
+	t3 := time.Now()
+
+	t4 := time.Now()
+	whichCase := "null"
 
 	reply.Term = rf.currentTerm
 
@@ -385,6 +392,9 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	   	reply.Success = false
 	   	reply.NextIdxToSend = lastLog(rf.Logs).Index + 1
+
+	   	t4 = time.Now()
+	   	whichCase = "first"
 
 	} else if args.PrevLogIndex < rf.lastIncludedIndex { // in snapshot 
 
@@ -399,11 +409,17 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		}
 		rf.persist()
 
+		t4 = time.Now()
+		whichCase = "second"
+
 	} else if rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term != args.PrevLogTerm { // logs don't match
 
 		reply.Success = false
 		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex) + 1
 		// previousTermIdx will be 0 if hitting the snapshot
+
+		t4 = time.Now()
+		whichCase = "third"
 
 	} else {
 
@@ -412,21 +428,37 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		rf.Logs = append(rf.Logs, args.Entries...)
 
 		rf.persist()
+
+		t4 = time.Now()
+		whichCase = "forth"
 	}
+
+	t5 := time.Now()
 
 	if reply.Success && 
 	   args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = minOfTwo(args.LeaderCommit, lastLog(rf.Logs).Index)
 	}
 
+	t6 := time.Now()
+
 	rf.applyStateMachine()
+
+	t7 := time.Now()
 	
 	rf.resetElecTimer()
 	// fmt.Println("receive appendEntries", "id", rf.me, "term", rf.currentTerm, "from leader", args.LeaderId)
 
-	tu := time.Now()
-	if tu.Sub(tl) > 20 * time.Millisecond {
-		fmt.Println("follower receive leader time err", tu.Sub(tl))
+	t8 := time.Now()
+
+	if t8.Sub(t1) > 20 * time.Millisecond {
+		fmt.Println("follower receive leader time err", t8.Sub(t1),
+					"old term", t2.Sub(t1),
+					"new term", t3.Sub(t2),
+					"all cases", t4.Sub(t3), "case", whichCase,
+					"commit index", t6.Sub(t5),
+					"apply", t7.Sub(t6),
+					"resetTimer", t8.Sub(t7))
 	}
 
 	rf.mu.Unlock()
