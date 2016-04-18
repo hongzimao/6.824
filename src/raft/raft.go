@@ -364,6 +364,8 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	rf.mu.Lock()
 
+	tl := time.Now()
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -421,6 +423,11 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 	
 	rf.resetElecTimer()
 	// fmt.Println("receive appendEntries", "id", rf.me, "term", rf.currentTerm, "from leader", args.LeaderId)
+
+	tu := time.Now()
+	if tu.Sub(tl) > 20 * time.Millisecond {
+		fmt.Println("follower receive leader time err", tu.Sub(tl))
+	}
 
 	rf.mu.Unlock()
 }
@@ -516,11 +523,8 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				rf.resetHbTimer()
 
-				t1 := time.Now()
-
 				rf.mu.Lock()
-
-				t2 := time.Now()
+				tl := time.Now()
 
 				if !rf.isLeader {
 					rf.mu.Unlock()
@@ -601,9 +605,11 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 				}
 
+				tu := time.Now()
+				if tu.Sub(tl) > 20 * time.Millisecond {
+					fmt.Println("leader send RPC time err", tu.Sub(tl))
+				}
 				rf.mu.Unlock()
-
-				t3 := time.Now()
 
 				for i := 0; i < len(rf.peers)-1; i++ { // no RPC for self
 					select{
@@ -611,6 +617,7 @@ func (rf *Raft) broadcastAppendEntries() {
 						case reply := <- installSnapshotChan:
 
 							rf.mu.Lock()
+							tl = time.Now()
 							
 							if !rf.isLeader || rf.currentTerm != reply.ArgsTerm{
 								rf.mu.Unlock()
@@ -630,11 +637,16 @@ func (rf *Raft) broadcastAppendEntries() {
 
 								}
 
+							tu = time.Now()
+							if tu.Sub(tl) > 20 * time.Millisecond {
+								fmt.Println("install snapshot RPC time err", tu.Sub(tl))
+							}
 							rf.mu.Unlock()
 
 						case reply := <- appendEntriesChan:
 
 							rf.mu.Lock()
+							tl = time.Now()
 							
 							if !rf.isLeader || rf.currentTerm != reply.ArgsTerm{
 								rf.mu.Unlock()
@@ -660,15 +672,16 @@ func (rf *Raft) broadcastAppendEntries() {
 									}
 								} 
 
+							tu = time.Now()
+							if tu.Sub(tl) > 20 * time.Millisecond {
+								fmt.Println("append entries RPC time err", tu.Sub(tl))
+							}
 							rf.mu.Unlock()
 					}
 				}
 
-				t4 := time.Now()
-
 				rf.mu.Lock()
-
-				t5 := time.Now()
+				tl = time.Now()
 							
 				if !rf.isLeader {
 					rf.mu.Unlock()
@@ -679,13 +692,12 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				rf.applyStateMachine()
 
-				rf.mu.Unlock()
-
-				t6 := time.Now()
-
-				if t6.Sub(t1) > 50 * time.Millisecond {
-					fmt.Println("Leader RPC elapsed ", t6.Sub(t1), "first lock", t2.Sub(t1), "send", t3.Sub(t2), "reply", t4.Sub(t3), "last lock", t5.Sub(t4))
+				tu = time.Now()
+				if tu.Sub(tl) > 20 * time.Millisecond {
+					fmt.Println("leader rest time err", tu.Sub(tl))
 				}
+
+				rf.mu.Unlock()
 
 			}
 	}
@@ -700,11 +712,8 @@ func (rf *Raft) ElectionTimeout() {
 
 				rf.resetElecTimer()
 
-				t1 := time.Now()
-
 				rf.mu.Lock()
-
-				t2 := time.Now()
+				tl := time.Now()
 
 				if rf.isLeader{
 					rf.mu.Unlock()			
@@ -747,9 +756,11 @@ func (rf *Raft) ElectionTimeout() {
 					}
 				}
 
+				tu := time.Now()
+				if tu.Sub(tl) > 20 * time.Millisecond {
+					fmt.Println("candidate RPC time err", tu.Sub(tl))
+				}
 				rf.mu.Unlock()
-
-				t3 := time.Now()
 
 				// count votes
 				voteCount := 1 // always vote for itself
@@ -760,6 +771,7 @@ func (rf *Raft) ElectionTimeout() {
 					reply := <- reqVoteChann // reqVote channel out
 
 					rf.mu.Lock()
+					tl = time.Now()
 
 					if rf.isLeader{
 						rf.mu.Unlock()
@@ -787,16 +799,16 @@ func (rf *Raft) ElectionTimeout() {
 						}
 					}
 
+					tu = time.Now()
+					if tu.Sub(tl) > 20 * time.Millisecond {
+						fmt.Println("candidate reply time err", tu.Sub(tl))
+					}
 					rf.mu.Unlock()
 				}
-
-				t4 := time.Now()
 
 				// fmt.Println("reqVote", "id", rf.me, "term", rf.currentTerm, "vote got", voteCount, "out of", len(rf.peers), "candidate?", stillCandidate)
 
 				rf.mu.Lock()
-
-				t5 := time.Now()
 
 				if stillCandidate && 
 				   (2 * voteCount) > len(rf.peers) {
@@ -806,12 +818,6 @@ func (rf *Raft) ElectionTimeout() {
 				}
 			
 				rf.mu.Unlock()	
-
-				t6 := time.Now()
-
-				if t6.Sub(t1) > 150 * time.Millisecond {
-					fmt.Println("Election elapsed ", t6.Sub(t1), "first lock", t2.Sub(t1), "send", t3.Sub(t2), "reply", t4.Sub(t3), "last lock", t5.Sub(t4))
-				}
 		}
 	}
 }
