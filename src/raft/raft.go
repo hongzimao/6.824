@@ -149,7 +149,7 @@ func (rf *Raft) becomesLeader() { // has lock already
 
 	rf.hbTimer.Reset(time.Duration(0) * time.Millisecond)
 	go rf.broadcastAppendEntries()
-	// fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
+	fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
 }
 
 func (rf *Raft) updateCommitIndex() { // has lock already
@@ -208,7 +208,7 @@ func (rf *Raft) GetState() (int, bool) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	
+
 	var term int
 	var isLeader bool
 
@@ -239,7 +239,7 @@ func (rf *Raft) persist() {
 	t2 := time.Now()
 
 	if t2.Sub(t1) > 20 * time.Millisecond {
-		// fmt.Println("persist time", t2.Sub(t1))
+		fmt.Println("persist time", t2.Sub(t1))
 	}
 }
 
@@ -373,6 +373,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply){
 
+	t0 := time.Now()
+
 	rf.mu.Lock()
 
 	t1 := time.Now()
@@ -462,8 +464,9 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	t8 := time.Now()
 
-	if t8.Sub(t1) > 20 * time.Millisecond {
-		fmt.Println("follower receive leader time err", t8.Sub(t1),
+	if t8.Sub(t0) > 20 * time.Millisecond {
+		fmt.Println("follower receive leader time err", t8.Sub(t0),
+					"lock", t1.Sub(t0),
 					"old term", t2.Sub(t1),
 					"new term", t3.Sub(t2),
 					"all cases", t4.Sub(t3), "case", whichCase,
