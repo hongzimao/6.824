@@ -206,6 +206,9 @@ func (rf *Raft) previousTermIdx(PrevLogIndex int) int { // has lock already
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
 	var term int
 	var isLeader bool
 
@@ -221,6 +224,8 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
+	t1 := time.Now()
+
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -230,6 +235,12 @@ func (rf *Raft) persist() {
 	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+
+	t2 := time.Now()
+
+	if t2.Sub(t1) > 20 * time.Millisecond {
+		// fmt.Println("persist time", t2.Sub(t1))
+	}
 }
 
 //
@@ -609,7 +620,8 @@ func (rf *Raft) broadcastAppendEntries() {
 							if lastLog(rf.Logs).Index < rf.nextIndex[i] { // heartbeat
 								args.Entries = []Log{}
 							} else { // user command
-								args.Entries = rf.Logs[rf.nextIndex[i] - rf.Logs[0].Index : ]
+								args.Entries = make([]Log, len(rf.Logs[rf.nextIndex[i] - rf.Logs[0].Index : ]))
+								copy(args.Entries, rf.Logs[rf.nextIndex[i] - rf.Logs[0].Index : ])
 							}
 							
 							go func(i int, args AppendEntriesArgs){
@@ -742,9 +754,10 @@ func (rf *Raft) ElectionTimeout() {
 				return
 			case <- rf.elecTimer.C:
 
+				rf.mu.Lock()
+
 				rf.resetElecTimer()
 
-				rf.mu.Lock()
 				tl := time.Now()
 
 				if rf.isLeader{
