@@ -82,6 +82,7 @@ func (kv *RaftKV) ApplyDb() {
 
 					r := bytes.NewBuffer(applymsg.Snapshot)
 					d := gob.NewDecoder(r)
+					kv.kvdb = make(map[string]string)
 					d.Decode(&kv.kvdb)
 					d.Decode(&kv.rfidx)
 					d.Decode(&kv.cltsqn)
