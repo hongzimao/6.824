@@ -108,14 +108,18 @@ func (kv *RaftKV) ApplyDb() {
 						}
 					}
 
+					kv.chanMapMu.Lock()
+					resCh := kv.resChanMap[applymsg.Index]
+					kv.chanMapMu.Unlock()
+
 					select{
-						case <- kv.resChanMap[applymsg.Index]:
+						case <- resCh:
 							// flush the channel
 						default:
 							// no need to flush
 					}
 
-					kv.resChanMap[applymsg.Index] <- ReplyRes{Value:kv.kvdb[op.Key], InOp:op}
+					resCh <- ReplyRes{Value:kv.kvdb[op.Key], InOp:op}
 				}
 
 				kv.mu.Unlock()
@@ -181,8 +185,12 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 	kv.createResChan(cmtidx)
 
+	kv.chanMapMu.Lock()
+	resCh := kv.resChanMap[cmtidx]
+	kv.chanMapMu.Unlock()
+
 	select{
-		case res := <- kv.resChanMap[cmtidx]:
+		case res := <- resCh:
 			if reflect.DeepEqual(op, res.InOp) {
 				reply.Value = res.Value
 			} else{
@@ -206,8 +214,12 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	kv.createResChan(cmtidx)
 
+	kv.chanMapMu.Lock()
+	resCh := kv.resChanMap[cmtidx]
+	kv.chanMapMu.Unlock()
+
 	select{
-		case res := <- kv.resChanMap[cmtidx]:
+		case res := <- resCh:
 			if reflect.DeepEqual(op, res.InOp) {
 				// dummy
 			} else{

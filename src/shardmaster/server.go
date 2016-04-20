@@ -207,14 +207,18 @@ func (sm *ShardMaster) ApplyDb() {
 					}	
 				}
 
+				sm.chanMapMu.Lock()
+				resCh := sm.resChanMap[applymsg.Index]
+				sm.chanMapMu.Unlock()
+
 				select{
-					case <- sm.resChanMap[applymsg.Index]:
+					case <- resCh:
 						// flush the channel
 					default:
 						// no need to flush
 				}
 
-				sm.resChanMap[applymsg.Index] <- ReplyRes{InOp:op}
+				resCh <- ReplyRes{InOp:op}
 
 				sm.mu.Unlock()
 			}
@@ -245,8 +249,12 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 
 	sm.createResChan(cmtidx)
 
+	sm.chanMapMu.Lock()
+	resCh := sm.resChanMap[cmtidx]
+	sm.chanMapMu.Unlock()
+
 	select{
-		case res := <- sm.resChanMap[cmtidx]:
+		case res := <- resCh:
 			if reflect.DeepEqual(op, res.InOp) {
 				// dummy
 			} else{
@@ -269,8 +277,12 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 	sm.createResChan(cmtidx)
 
+	sm.chanMapMu.Lock()
+	resCh := sm.resChanMap[cmtidx]
+	sm.chanMapMu.Unlock()
+
 	select{
-		case res := <- sm.resChanMap[cmtidx]:
+		case res := <- resCh:
 			if reflect.DeepEqual(op, res.InOp) {
 				// dummy
 			} else{
@@ -293,8 +305,12 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 	sm.createResChan(cmtidx)
 
+	sm.chanMapMu.Lock()
+	resCh := sm.resChanMap[cmtidx]
+	sm.chanMapMu.Unlock()
+
 	select{
-		case res := <- sm.resChanMap[cmtidx]:
+		case res := <- resCh:
 			if reflect.DeepEqual(op, res.InOp) {
 				// dummy
 			} else{
@@ -317,8 +333,12 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	
 	sm.createResChan(cmtidx)
 
+	sm.chanMapMu.Lock()
+	resCh := sm.resChanMap[cmtidx]
+	sm.chanMapMu.Unlock()
+
 	select{
-		case res := <- sm.resChanMap[cmtidx]:
+		case res := <- resCh:
 			if reflect.DeepEqual(op, res.InOp) {
 				if args.Num == -1 || args.Num >= len(sm.configs) {
 					// config always non-empty
