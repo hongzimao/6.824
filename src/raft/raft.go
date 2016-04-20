@@ -24,7 +24,7 @@ import (
 	"math/rand"
 	"bytes"
 	"encoding/gob"
-	"fmt"
+	// "fmt"
 	)
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -32,7 +32,7 @@ import (
 // tester) on the same server, via the applyCh passed to Make().
 //
 
-const receiveVoteTimeout = 120
+const receiveVoteTimeout = 100
 const LeaderRPCTimeout = 20
 const requestVoteTimeoutMin = 150
 const requestVoteTimeoutMax = 300
@@ -152,7 +152,7 @@ func (rf *Raft) becomesLeader() { // has lock already
 
 	rf.hbTimer.Reset(time.Duration(0) * time.Millisecond)
 	go rf.broadcastAppendEntries()
-	fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
+	// fmt.Println("---- becomes Leader ", "id", rf.me, "term", rf.currentTerm)
 }
 
 func (rf *Raft) updateCommitIndex() { // has lock already
@@ -227,8 +227,6 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	t1 := time.Now()
-
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -238,12 +236,6 @@ func (rf *Raft) persist() {
 	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-
-	t2 := time.Now()
-
-	if t2.Sub(t1) > 20 * time.Millisecond {
-		fmt.Println("persist time", t2.Sub(t1))
-	}
 }
 
 //
@@ -372,17 +364,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			rf.resetElecTimer()
 		} 
 	}
-
-	// fmt.Println("receive reqest vote RPC", "id", rf.me, "term", rf.currentTerm, "voteFor", rf.voteFor, reply.VoteGranted)	
 }
 
 func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply){
 
-	t0 := time.Now()
-
 	rf.mu.Lock()
-
-	t1 := time.Now()
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -391,18 +377,11 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		return
 	}
 
-	t2 := time.Now()
-
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.backToFollower()
 		rf.persist()
 	}
-
-	t3 := time.Now()
-
-	t4 := time.Now()
-	whichCase := "null"
 
 	reply.Term = rf.currentTerm
 
@@ -410,9 +389,6 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 
 	   	reply.Success = false
 	   	reply.NextIdxToSend = lastLog(rf.Logs).Index + 1
-
-	   	t4 = time.Now()
-	   	whichCase = "first"
 
 	} else if args.PrevLogIndex < rf.lastIncludedIndex { // in snapshot 
 
@@ -427,17 +403,11 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		}
 		rf.persist()
 
-		t4 = time.Now()
-		whichCase = "second"
-
 	} else if rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term != args.PrevLogTerm { // logs don't match
 
 		reply.Success = false
 		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex) + 1
 		// previousTermIdx will be 0 if hitting the snapshot
-
-		t4 = time.Now()
-		whichCase = "third"
 
 	} else {
 
@@ -446,39 +416,16 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		rf.Logs = append(rf.Logs, args.Entries...)
 
 		rf.persist()
-
-		t4 = time.Now()
-		whichCase = "forth"
 	}
-
-	t5 := time.Now()
 
 	if reply.Success && 
 	   args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = minOfTwo(args.LeaderCommit, lastLog(rf.Logs).Index)
 	}
 
-	t6 := time.Now()
-
 	rf.applyStateMachine()
-
-	t7 := time.Now()
 	
 	rf.resetElecTimer()
-	// fmt.Println("receive appendEntries", "id", rf.me, "term", rf.currentTerm, "from leader", args.LeaderId)
-
-	t8 := time.Now()
-
-	if t8.Sub(t0) > 20 * time.Millisecond {
-		fmt.Println("follower receive leader time err", t8.Sub(t0),
-					"lock", t1.Sub(t0),
-					"old term", t2.Sub(t1),
-					"new term", t3.Sub(t2),
-					"all cases", t4.Sub(t3), "case", whichCase,
-					"commit index", t6.Sub(t5),
-					"apply", t7.Sub(t6),
-					"resetTimer", t8.Sub(t7))
-	}
 
 	rf.mu.Unlock()
 }
@@ -576,8 +523,6 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				rf.resetHbTimer()
 
-				tl := time.Now()
-
 				if !rf.isLeader {
 					rf.mu.Unlock()
 					return
@@ -638,7 +583,6 @@ func (rf *Raft) broadcastAppendEntries() {
 								reply := &AppendEntriesReply{}
 
 								go func(j int, args AppendEntriesArgs) {
-									// fmt.Println("send HB RPC", "id", rf.me, "term", rf.currentTerm)
 									ldch <- rf.sendAppendEntries(j, args, reply)
 								}(i, args)
 
@@ -659,10 +603,6 @@ func (rf *Raft) broadcastAppendEntries() {
 					}
 				}
 
-				tu := time.Now()
-				if tu.Sub(tl) > 20 * time.Millisecond {
-					fmt.Println("leader send RPC time err", tu.Sub(tl))
-				}
 				rf.mu.Unlock()
 
 				for i := 0; i < len(rf.peers)-1; i++ { // no RPC for self
@@ -671,7 +611,6 @@ func (rf *Raft) broadcastAppendEntries() {
 						case reply := <- installSnapshotChan:
 
 							rf.mu.Lock()
-							tl = time.Now()
 							
 							if !rf.isLeader || rf.currentTerm != reply.ArgsTerm{
 								rf.mu.Unlock()
@@ -691,16 +630,11 @@ func (rf *Raft) broadcastAppendEntries() {
 
 								}
 
-							tu = time.Now()
-							if tu.Sub(tl) > 20 * time.Millisecond {
-								fmt.Println("install snapshot RPC time err", tu.Sub(tl))
-							}
 							rf.mu.Unlock()
 
 						case reply := <- appendEntriesChan:
 
 							rf.mu.Lock()
-							tl = time.Now()
 							
 							if !rf.isLeader || rf.currentTerm != reply.ArgsTerm{
 								rf.mu.Unlock()
@@ -726,16 +660,11 @@ func (rf *Raft) broadcastAppendEntries() {
 									}
 								} 
 
-							tu = time.Now()
-							if tu.Sub(tl) > 20 * time.Millisecond {
-								fmt.Println("append entries RPC time err", tu.Sub(tl))
-							}
 							rf.mu.Unlock()
 					}
 				}
 
 				rf.mu.Lock()
-				tl = time.Now()
 							
 				if !rf.isLeader {
 					rf.mu.Unlock()
@@ -745,11 +674,6 @@ func (rf *Raft) broadcastAppendEntries() {
 				rf.updateCommitIndex()
 
 				rf.applyStateMachine()
-
-				tu = time.Now()
-				if tu.Sub(tl) > 20 * time.Millisecond {
-					fmt.Println("leader rest time err", tu.Sub(tl))
-				}
 
 				rf.mu.Unlock()
 
@@ -767,8 +691,6 @@ func (rf *Raft) ElectionTimeout() {
 				rf.mu.Lock()
 
 				rf.resetElecTimer()
-
-				tl := time.Now()
 
 				if rf.isLeader{
 					rf.mu.Unlock()			
@@ -794,7 +716,6 @@ func (rf *Raft) ElectionTimeout() {
 							reply := &RequestVoteReply{}
 
 							go func(i int, args RequestVoteArgs) {
-								// fmt.Println("send reqest vote RPC", "id", rf.me, "term", rf.currentTerm)
 								ldch <- rf.sendRequestVote(i, args, reply)
 							}(i, args)
 
@@ -812,10 +733,6 @@ func (rf *Raft) ElectionTimeout() {
 					}
 				}
 
-				tu := time.Now()
-				if tu.Sub(tl) > 20 * time.Millisecond {
-					fmt.Println("candidate RPC time err", tu.Sub(tl))
-				}
 				rf.mu.Unlock()
 
 				// count votes
@@ -827,7 +744,6 @@ func (rf *Raft) ElectionTimeout() {
 					reply := <- reqVoteChann // reqVote channel out
 
 					rf.mu.Lock()
-					tl = time.Now()
 
 					if rf.isLeader{
 						rf.mu.Unlock()
@@ -855,10 +771,6 @@ func (rf *Raft) ElectionTimeout() {
 						}
 					}
 
-					tu = time.Now()
-					if tu.Sub(tl) > 20 * time.Millisecond {
-						fmt.Println("candidate reply time err", tu.Sub(tl))
-					}
 					rf.mu.Unlock()
 				}
 
@@ -872,8 +784,6 @@ func (rf *Raft) ElectionTimeout() {
 						rf.mu.Unlock()
 						return
 				}
-
-				fmt.Println("candidate not leader", "id", rf.me, "term", rf.currentTerm, "voteFor", rf.voteFor, "voteCount", voteCount, "still candidate", stillCandidate)
 			
 				rf.mu.Unlock()	
 		}
