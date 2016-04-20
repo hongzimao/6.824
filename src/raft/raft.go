@@ -118,17 +118,20 @@ func lastLog(Logs []Log) Log {
 	return Logs[len(Logs) - 1]
 }
 
-func (rf *Raft) resetElecTimer(){ // no lock
-	rf.elecTimer.Reset(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax))* time.Millisecond)
+func (rf *Raft) resetElecTimer(){ // has lock already
+	rf.elecTimer.Reset(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax)) * time.Millisecond)
 }
 
-func (rf *Raft) resetHbTimer(){ // no lock
+func (rf *Raft) resetHbTimer(){ // has lock already
  	rf.hbTimer.Reset(time.Duration(appendEntriesTimeout)* time.Millisecond)
  }
 
 func (rf *Raft) backToFollower() { // has lock already
 	if rf.isLeader {
 			rf.isLeader = false // back to follower
+			if !rf.elecTimer.Stop(){
+				<- rf.elecTimer.C
+			}
 			rf.resetElecTimer()
 			go rf.ElectionTimeout()
 		}
@@ -368,7 +371,9 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 			rf.resetElecTimer()
 		} 
-	}	
+	}
+
+	// fmt.Println("receive reqest vote RPC", "id", rf.me, "term", rf.currentTerm, "voteFor", rf.voteFor, reply.VoteGranted)	
 }
 
 func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply){
@@ -567,9 +572,10 @@ func (rf *Raft) broadcastAppendEntries() {
 				return
 			case <- rf.hbTimer.C:
 
+				rf.mu.Lock()
+
 				rf.resetHbTimer()
 
-				rf.mu.Lock()
 				tl := time.Now()
 
 				if !rf.isLeader {
@@ -632,6 +638,7 @@ func (rf *Raft) broadcastAppendEntries() {
 								reply := &AppendEntriesReply{}
 
 								go func(j int, args AppendEntriesArgs) {
+									// fmt.Println("send HB RPC", "id", rf.me, "term", rf.currentTerm)
 									ldch <- rf.sendAppendEntries(j, args, reply)
 								}(i, args)
 
@@ -787,6 +794,7 @@ func (rf *Raft) ElectionTimeout() {
 							reply := &RequestVoteReply{}
 
 							go func(i int, args RequestVoteArgs) {
+								// fmt.Println("send reqest vote RPC", "id", rf.me, "term", rf.currentTerm)
 								ldch <- rf.sendRequestVote(i, args, reply)
 							}(i, args)
 
@@ -864,6 +872,8 @@ func (rf *Raft) ElectionTimeout() {
 						rf.mu.Unlock()
 						return
 				}
+
+				fmt.Println("candidate not leader", "id", rf.me, "term", rf.currentTerm, "voteFor", rf.voteFor, "voteCount", voteCount, "still candidate", stillCandidate)
 			
 				rf.mu.Unlock()	
 		}
@@ -935,9 +945,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialization from scratch
 
-	rf.elecTimer = time.NewTimer(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax)) * time.Millisecond)
-	rf.hbTimer = time.NewTimer(time.Duration(0)* time.Millisecond)
-
 	rf.mu.Lock()
 
 	rf.currentTerm = -1
@@ -968,9 +975,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	rf.mu.Unlock()
+	rf.elecTimer = time.NewTimer(time.Duration(randIntRange(requestVoteTimeoutMin, requestVoteTimeoutMax)) * time.Millisecond)
+	rf.hbTimer = time.NewTimer(time.Duration(appendEntriesTimeout)* time.Millisecond)
 
 	go rf.ElectionTimeout()
+
+	rf.mu.Unlock()
 
 	return rf
 }
