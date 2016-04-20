@@ -14,7 +14,6 @@ import (
 
 const Debug = 0
 
-const LogLenCheckerTimeout = 50 
 const ClientRPCTimeout = 50
 const MaxRaftFactor = 0.8
 
@@ -56,8 +55,6 @@ type RaftKV struct {
 
 	chanMapMu  sync.Mutex
 	resChanMap map [int] chan ReplyRes // communication from applyDb to clients
-
-	loglenTimer *time.Timer
 
 	// close goroutine
 	killIt chan bool
@@ -123,30 +120,21 @@ func (kv *RaftKV) ApplyDb() {
 				}
 
 				kv.mu.Unlock()
+
+				go kv.CheckSnapshot()
 			}
 	}
 }
 
 func (kv *RaftKV) CheckSnapshot() {
-	for {
-		select {
-			case <- kv.killIt:
-				return
-			case <- kv.loglenTimer.C:
-				
-				kv.loglenTimer.Reset(time.Duration(LogLenCheckerTimeout)* time.Millisecond)
-
-				if float64(kv.rf.GetStateSize()) / float64(kv.maxraftstate) > MaxRaftFactor {
-					
-					kv.SaveSnapshot()
-				}
-		}
+	if float64(kv.rf.GetStateSize()) / float64(kv.maxraftstate) > MaxRaftFactor {
+		kv.SaveSnapshot()
 	}
 }
 
 func (kv *RaftKV) SaveSnapshot() { 
 	kv.mu.Lock()
-
+	
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(kv.kvdb)
@@ -281,10 +269,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.ReadSnapshot(persister.ReadSnapshot())
 
 	go kv.ApplyDb()
-
-	kv.loglenTimer = time.NewTimer(time.Duration(LogLenCheckerTimeout)* time.Millisecond)
-
-	go kv.CheckSnapshot()
 
 	return kv
 }

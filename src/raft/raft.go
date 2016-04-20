@@ -189,6 +189,7 @@ func (rf *Raft) applyStateMachine() { // has lock already
 			var applyMsg ApplyMsg
 			applyMsg.Index = rf.lastApplied
 			applyMsg.Command = rf.Logs[rf.lastApplied - rf.Logs[0].Index].Command
+			applyMsg.UseSnapshot = false
 
 			rf.applyCh <- applyMsg
 		}
@@ -464,18 +465,14 @@ func (rf *Raft) InstallSnapshot(args InstallSnapshotArgs, reply *InstallSnapshot
 		rf.persist()
 	}
 
-	if rf.commitIndex < rf.lastIncludedIndex {
-		rf.commitIndex = rf.lastIncludedIndex
-	}
+	rf.persister.SaveSnapshot(args.Data)
 
-	if rf.lastApplied < rf.lastIncludedIndex {
-		rf.lastApplied = rf.lastIncludedIndex
+	applyMsg := ApplyMsg{UseSnapshot: true, Snapshot:args.Data}
 
-		rf.persister.SaveSnapshot(args.Data)
-		
-		applyMsg := ApplyMsg{UseSnapshot: true, Snapshot:args.Data}
-		rf.applyCh <- applyMsg
-	}
+	rf.lastApplied = rf.lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
+
+	rf.applyCh <- applyMsg
 }
 
 // --------------------------------------------------------------------
