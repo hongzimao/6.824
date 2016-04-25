@@ -14,7 +14,6 @@ import (
 
 const Debug = 0
 
-const ClientRPCTimeout = 50
 const MaxRaftFactor = 0.8
 
 const ResChanSize = 1

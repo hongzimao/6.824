@@ -406,10 +406,9 @@ func (rf *Raft) ReceiveAppendEntries(args AppendEntriesArgs, reply *AppendEntrie
 		rf.persist()
 
 	} else if rf.Logs[args.PrevLogIndex - rf.Logs[0].Index].Term != args.PrevLogTerm { // logs don't match
-
 		reply.Success = false
 		reply.NextIdxToSend = rf.previousTermIdx(args.PrevLogIndex) + 1
-		// previousTermIdx will be 0 if hitting the snapshot
+		// previousTermIdx will be -1 if hitting the snapshot
 
 	} else {
 
@@ -534,7 +533,6 @@ func (rf *Raft) broadcastAppendEntries() {
 
 						if rf.nextIndex[i] <= rf.lastIncludedIndex {
 							// nextIndex is in snapshot, apply InstallSnapshotRPC
-
 							args := InstallSnapshotArgs{Term: rf.currentTerm, 
 														LeaderId: rf.me, 
 														LastIncludedIndex: rf.lastIncludedIndex, 
@@ -568,7 +566,7 @@ func (rf *Raft) broadcastAppendEntries() {
 													  LeaderCommit: rf.commitIndex,
 													  PrevLogIndex: rf.nextIndex[i] - 1,
 													  PrevLogTerm: rf.Logs[rf.nextIndex[i] - 1 - rf.Logs[0].Index].Term}
-
+							
 							if lastLog(rf.Logs).Index < rf.nextIndex[i] { // heartbeat
 								args.Entries = []Log{}
 							} else { // user command
