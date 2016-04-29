@@ -13,32 +13,70 @@ const (
 	OK            = "OK"
 	ErrNoKey      = "ErrNoKey"
 	ErrWrongGroup = "ErrWrongGroup"
+	ErrInTransit  = "ErrInTransit"
 )
 
 type Err string
 
+// ------------------------
+// Basic Bundles
+// ------------------------
+
+type ShardVer struct {
+	Shard   	 int
+	VerNum  	 int
+}
+
+type ServerValid struct {
+	Servers 	 []string
+	Valid   	 bool
+}
+
+type ReplyRes struct {
+	Value   	 string 
+	InOp    	 Op
+	WrongGroup 	 bool
+	InTransit    bool
+}
+
+// ------------------------
+// RPC's
+// ------------------------
+
+type PullShardArgs struct {
+	Shard 	     int
+	VerNum	     int
+}
+
+type PullShardReply struct {
+	KvDb    	 map[string]string
+	RfIdx   	 int 
+	CltSqn  	 map[int64]int64  
+	Success      bool
+}
+
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	CltId  int64
-	SeqNum int64
+	Key   		 string
+	Value 		 string
+	Op    		 string  // "Put" or "Append"
+	CltId  		 int64
+	SeqNum 		 int64
 }
 
 type PutAppendReply struct {
-	WrongLeader bool
-	Err         Err
+	WrongLeader  bool
+	Err          Err
 }
 
 type GetArgs struct {
-	Key string
-	CltId  int64
-	SeqNum int64
+	Key 	     string
+	CltId  	 	 int64
+	SeqNum 		 int64
 }
 
 type GetReply struct {
-	WrongLeader bool
-	Err         Err
-	Value       string
+	WrongLeader  bool
+	Err          Err
+	Value        string
 }

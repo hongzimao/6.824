@@ -342,12 +342,18 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	select{
 		case res := <- resCh:
 			if reflect.DeepEqual(op, res.InOp) {
+				
+				sm.mu.Lock()
+				
 				if args.Num == -1 || args.Num >= len(sm.configs) {
 					// config always non-empty
 					reply.Config = sm.LastConfig()
 				} else {
 					reply.Config = sm.configs[args.Num]
 				}
+
+				sm.mu.Unlock()
+				
 			} else{
 				reply.WrongLeader = true
 			}
