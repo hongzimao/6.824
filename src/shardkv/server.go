@@ -125,8 +125,13 @@ func (kv *ShardKV) PollShards() {
 			case <- kv.psTimer.C:
 
 				kv.mu.Lock()
+				localPullMap := make(map[ShardVer]ServerValid)
+				for k, v := range kv.pullMap {
+					localPullMap[k] = v
+				}
+				kv.mu.Unlock()
 
-				for shardVer, serversValid := range kv.pullMap{
+				for shardVer, serversValid := range localPullMap {
 
 					if serversValid.Valid {  // needs shard from others	
 
@@ -149,8 +154,6 @@ func (kv *ShardKV) PollShards() {
 						}
 					}
 				}
-
-				kv.mu.Unlock()
 
 				kv.psTimer.Reset(time.Duration(PollShardsTimeout)* time.Millisecond)
 		}
