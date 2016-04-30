@@ -30,7 +30,6 @@ type ShardConfigOp struct {
 
 type PullShardOp struct {
 	KvDb    map[string]string
-	RfIdx   int 
 	CltSqn  map[int64]int64  
 	SV 		ShardVer
 }
@@ -69,9 +68,10 @@ type ShardKV struct {
 
 	maxraftstate int 				   // snapshot if log grows this big
 
-	kvdb    map[string]string
-	rfidx   int 
-	cltsqn  map[int64]int64  		   // sequence number log for each client
+	kvdbs    []map[string]string	   // each shard has a db and sqn
+	cltsqns  []map[int64]int64  	   // sequence number log for each client
+
+	rfidx    int 					   // raft grows to index
 
 	chanMapMu  sync.Mutex
 	resChanMap map [int] chan ReplyRes // communication from applyDb to clients
@@ -107,10 +107,31 @@ func (kv *ShardKV) PollConfig() {
 
 				newConfig := kv.mck.Query(nextConfigIdx) 
 
+				kv.mu.Lock()
+
 				if newConfig.Num == nextConfigIdx {  // got new config
-					op := ShardConfigOp{Config: newConfig}
-					kv.rf.Start(op)
+
+					okToUpdate := true
+
+					for s := 0; s < shardmaster.NShards; s ++ {  
+						g := kv.config.Shards[s]
+						if g == kv.gid {  // in charge of this shard in current config
+							if kv.shardsVerNum[s] != kv.config.Num{  // config during transit
+								okToUpdate = false
+								break
+							}
+						}
+					}
+
+					if okToUpdate {
+						// fmt.Println(newConfig.Num)
+						op := ShardConfigOp{Config: newConfig}
+						kv.rf.Start(op)
+					}
+
 				}
+
+				kv.mu.Unlock()
 
 				kv.pcTimer.Reset(time.Duration(PollConfigTimeout)* time.Millisecond)
 		}
@@ -139,15 +160,14 @@ func (kv *ShardKV) PollShards() {
 
 							srv := kv.make_end(serversValid.Servers[si])
 
-							args := PullShardArgs{Shard:shardVer.Shard, VerNum:shardVer.VerNum}
+							args := PullShardArgs{Shard:shardVer.Shard, VerNum:shardVer.VerNum, ConfNum:shardVer.ConfNum}
 							var reply PullShardReply
 							
 							ok := srv.Call("ShardKV.PullShard", &args, &reply)
 
 							if ok && reply.Success {  // got the reply from intended shard group
 
-								// if kv.pullMap[shardVer].Valid  // all lock here
-								op := PullShardOp{KvDb: reply.KvDb, RfIdx: reply.RfIdx, CltSqn: reply.CltSqn, SV: shardVer}
+								op := PullShardOp{KvDb: reply.KvDb, CltSqn: reply.CltSqn, SV: shardVer}
 								kv.rf.Start(op)
 
 							}
@@ -158,6 +178,39 @@ func (kv *ShardKV) PollShards() {
 				kv.psTimer.Reset(time.Duration(PollShardsTimeout)* time.Millisecond)
 		}
 	}
+}
+
+// --------------------------------------------------------------------
+// Shard Group RPC Functions
+// --------------------------------------------------------------------
+
+func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
+
+	kv.mu.Lock()
+
+	// if kv.shardsVerNum[args.Shard] == args.VerNum {
+	// if kv.config.Num == args.ConfNum {
+	if kv.config.Num >= args.ConfNum && kv.shardsVerNum[args.Shard] == args.VerNum {
+
+		reply.Success = true
+
+		reply.KvDb = make(map[string]string)
+		reply.CltSqn = make(map[int64]int64)
+		
+		for k, v := range kv.kvdbs[args.Shard] {
+			reply.KvDb[k] = v
+		}
+
+		for k, v := range kv.cltsqns[args.Shard] {
+			reply.CltSqn[k] = v
+		}
+
+	} else {
+
+		reply.Success = false
+	}
+
+	kv.mu.Unlock()
 }
 
 // --------------------------------------------------------------------
@@ -178,11 +231,14 @@ func (kv *ShardKV) ApplyDb() {
 
 					r := bytes.NewBuffer(applymsg.Snapshot)
 					d := gob.NewDecoder(r)
-					kv.kvdb = make(map[string]string)
+					for i := 0; i < shardmaster.NShards; i ++ {
+						kv.kvdbs[i] = make(map[string]string)	
+						kv.cltsqns[i] = make(map[int64]int64)
+					}
 					kv.pullMap = make(map[ShardVer]ServerValid)
-					d.Decode(&kv.kvdb)
+					d.Decode(&kv.kvdbs)
 					d.Decode(&kv.rfidx)
-					d.Decode(&kv.cltsqn)
+					d.Decode(&kv.cltsqns)
 					d.Decode(&kv.config)
 					d.Decode(&kv.shardsVerNum)
 					d.Decode(&kv.pullMap)
@@ -202,41 +258,31 @@ func (kv *ShardKV) ApplyDb() {
 						// ------------------- update config op -------------------
 
 						case ShardConfigOp:  // update config
-
+							
 							if op.Config.Num > kv.config.Num { 
 
-								okToUpdate := true
 								for s := 0; s < shardmaster.NShards; s ++ {  
-									g := kv.config.Shards[s]
-									if g == kv.gid {  // in charge of this shard in current config
-										if kv.shardsVerNum[s] != kv.config.Num{  // config during transit
-											okToUpdate = false
-											break
-										}
-									}
-								}
-								if okToUpdate {
-									for s := 0; s < shardmaster.NShards; s ++ {  
-										g := op.Config.Shards[s]
+									g := op.Config.Shards[s]
 
-										if g == kv.gid { // in charge of this shard in new config
+									if g == kv.gid { // in charge of this shard in new config
+										
+										if kv.shardsVerNum[s] == kv.config.Num {  // in previous config
+
+											kv.shardsVerNum[s] = op.Config.Num  // no need to pull
 											
-											if kv.shardsVerNum[s] == kv.config.Num {  // in previous config
-
-												kv.shardsVerNum[s] = op.Config.Num  // no need to pull
-												
-											} else {
-												
-												shardVer := ShardVer{Shard:s, VerNum:kv.config.Num}
-												oldServer := kv.config.Groups[kv.config.Shards[s]]
-												serversValid := ServerValid{Servers: oldServer, Valid: true}
-												kv.pullMap[shardVer] = serversValid
-											}
+										} else {
+											
+											shardVer := ShardVer{Shard:s, VerNum:kv.config.Num, ConfNum:op.Config.Num}
+											oldServer := kv.config.Groups[kv.config.Shards[s]]
+											serversValid := ServerValid{Servers: oldServer, Valid: true}
+											kv.pullMap[shardVer] = serversValid
 										}
 									}
-
-									kv.config = op.Config 
 								}
+
+								kv.config = op.Config 
+								
+								// fmt.Println("new config", kv.config)
 
 							}
 
@@ -246,24 +292,23 @@ func (kv *ShardKV) ApplyDb() {
 							
 							if kv.pullMap[op.SV].Valid {
 
-								kv.rfidx = op.RfIdx
-
-								kv.kvdb = make(map[string]string)
-								kv.cltsqn = make(map[int64]int64)
+								kv.kvdbs[op.SV.Shard] = make(map[string]string)
+								kv.cltsqns[op.SV.Shard] = make(map[int64]int64)
 								
 								for k, v := range op.KvDb {
-									kv.kvdb[k] = v
+									kv.kvdbs[op.SV.Shard][k] = v
 								}
 
 								for k, v := range op.CltSqn {
-									kv.cltsqn[k] = v
+									kv.cltsqns[op.SV.Shard][k] = v
 								}
 
 								kv.pullMap[op.SV] = ServerValid{Servers: kv.pullMap[op.SV].Servers, 
 																Valid: false}  // invalid pullMap
 
 								kv.shardsVerNum[op.SV.Shard] = kv.config.Num  // update version number
-
+								
+								// fmt.Println("pull shards", "for shard #", op.SV.Shard, "pullMap", kv.pullMap, "shard version", op.SV, "in kvdb", op.KvDb)
 							}
 
 						// ------------------- client request op -------------------
@@ -277,18 +322,18 @@ func (kv *ShardKV) ApplyDb() {
 							if kv.gid == gid {
 
 								if kv.shardsVerNum[shard] != kv.config.Num {  // during transition
-									// TODO: disable it here?
+
 									resCh <- ReplyRes{InTransit: true}	
 
 								} else {
 
-									if val, ok := kv.cltsqn[op.CltId]; !ok || op.SeqNum > val {
+									if val, ok := kv.cltsqns[shard][op.CltId]; !ok || op.SeqNum > val {
 
-										kv.cltsqn[op.CltId] = op.SeqNum
+										kv.cltsqns[shard][op.CltId] = op.SeqNum
 										if op.Request == "Put" {
-											kv.kvdb[op.Key] = op.Value
+											kv.kvdbs[shard][op.Key] = op.Value
 										} else if op.Request == "Append" {
-											kv.kvdb[op.Key] += op.Value
+											kv.kvdbs[shard][op.Key] += op.Value
 										} else if op.Request == "Get" {
 											// dummy
 										}
@@ -301,8 +346,9 @@ func (kv *ShardKV) ApplyDb() {
 											// no need to flush
 									}
 
-									resCh <- ReplyRes{Value:kv.kvdb[op.Key], InOp:op, WrongGroup: false, InTransit: false}	
-
+									resCh <- ReplyRes{Value:kv.kvdbs[shard][op.Key], InOp:op, WrongGroup: false, InTransit: false}	
+									
+									// fmt.Println("op success", op.Request, "shard #", shard, "ver num", kv.config.Num, "value", kv.kvdbs[shard][op.Key])
 								}
 							
 							} else {
@@ -336,9 +382,9 @@ func (kv *ShardKV) SaveSnapshot() {
 	
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
-	e.Encode(kv.kvdb)
+	e.Encode(kv.kvdbs)
 	e.Encode(kv.rfidx)
-	e.Encode(kv.cltsqn)
+	e.Encode(kv.cltsqns)
 	e.Encode(kv.config)
 	e.Encode(kv.shardsVerNum)
 	e.Encode(kv.pullMap)
@@ -357,45 +403,12 @@ func (kv *ShardKV) ReadSnapshot(data []byte) {
 
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
-	d.Decode(&kv.kvdb)
+	d.Decode(&kv.kvdbs)
 	d.Decode(&kv.rfidx)
-	d.Decode(&kv.cltsqn)
+	d.Decode(&kv.cltsqns)
 	d.Decode(&kv.config)
 	d.Decode(&kv.shardsVerNum)
 	d.Decode(&kv.pullMap)
-}
-
-// --------------------------------------------------------------------
-// Shard Group RPC Functions
-// --------------------------------------------------------------------
-
-func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
-
-	kv.mu.Lock()
-
-	if kv.shardsVerNum[args.Shard] == args.VerNum {
-
-		reply.Success = true
-
-		reply.RfIdx = kv.rfidx
-
-		reply.KvDb = make(map[string]string)
-		reply.CltSqn = make(map[int64]int64)
-		
-		for k, v := range kv.kvdb {
-			reply.KvDb[k] = v
-		}
-
-		for k, v := range kv.cltsqn {
-			reply.CltSqn[k] = v
-		}
-
-	} else {
-
-		reply.Success = false
-	}
-
-	kv.mu.Unlock()
 }
 
 // --------------------------------------------------------------------
@@ -533,9 +546,15 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	kv.kvdb = make(map[string]string)
+	kv.kvdbs = make([]map[string]string, shardmaster.NShards)
+	kv.cltsqns = make([]map[int64]int64, shardmaster.NShards)
+
+	for i := 0; i < shardmaster.NShards; i ++ {
+		kv.kvdbs[i] = make(map[string]string)
+		kv.cltsqns[i] = make(map[int64]int64)
+	}
+
 	kv.rfidx = 0
-	kv.cltsqn = make(map[int64]int64)
 
 	kv.resChanMap = make(map [int] chan ReplyRes)
 
@@ -550,9 +569,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ReadSnapshot(persister.ReadSnapshot())
 
 	kv.pcTimer = time.NewTimer(time.Duration(PollConfigTimeout)* time.Millisecond)
-	kv.psTimer = time.NewTimer(time.Duration(PollShardsTimeout)* time.Millisecond)
-
 	go kv.PollConfig()
+
+	kv.psTimer = time.NewTimer(time.Duration(PollShardsTimeout)* time.Millisecond)
 	go kv.PollShards()
 
 	go kv.ApplyDb()

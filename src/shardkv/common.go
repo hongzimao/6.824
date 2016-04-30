@@ -25,6 +25,7 @@ type Err string
 type ShardVer struct {
 	Shard   	 int
 	VerNum  	 int
+	ConfNum		 int
 }
 
 type ServerValid struct {
@@ -46,11 +47,11 @@ type ReplyRes struct {
 type PullShardArgs struct {
 	Shard 	     int
 	VerNum	     int
+	ConfNum		 int
 }
 
 type PullShardReply struct {
 	KvDb    	 map[string]string
-	RfIdx   	 int 
 	CltSqn  	 map[int64]int64  
 	Success      bool
 }
