@@ -141,6 +141,10 @@ func (kv *ShardKV) PollConfig() {
 						}
 					}
 
+					if len(kv.pullMap) != 0 {  // shards are still moving around
+						okToUpdate = false
+					}
+
 					if okToUpdate {
 						// fmt.Println(newConfig.Num)
 						op := ShardConfigOp{Config: newConfig}
