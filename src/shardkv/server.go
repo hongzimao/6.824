@@ -65,7 +65,7 @@ type ShardKV struct {
 	mck          *shardmaster.Clerk
 	config       shardmaster.Config
 
-	shardsVerNum []int            	   // version number for each shard
+	shardsVerNum []int            	   		     // version number for each shard
 
 	pullMap      map[ShardVer]ServerValid 
 
@@ -75,20 +75,19 @@ type ShardKV struct {
 	
 	masters      []*labrpc.ClientEnd
 
-	maxraftstate int 				   // snapshot if log grows this big
+	maxraftstate int 				   			 // snapshot if log grows this big
 
-	kvdbs    []map[string]string	   // each shard has a db and sqn
-	cltsqns  []map[int64]int64  	   // sequence number log for each client
+	kvdbs        []map[string]string	   		 // each shard has a db and sqn
+	cltsqns      []map[int64]int64  	   		 // sequence number log for each client
 
-	rfidx    int 					   // raft grows to index
+	rfidx        int 					   		 // raft grows to index
 
-	chanMapMu  sync.Mutex
-	resChanMap map [int] chan ReplyRes // communication from applyDb to clients
+	resChanMap   map [int] chan ReplyRes 		 // communication from applyDb to clients
 
-	pcTimer *time.Timer  			   // timer for polling the configuration
-	psTimer *time.Timer  			   // timer for sending PullShards requests
+	pcTimer      *time.Timer  			   		 // timer for polling the configuration
+	psTimer      *time.Timer  			   		 // timer for sending PullShards requests
 
-	killIt chan bool   				   // close goroutine
+	killIt       chan bool   				   	 // close goroutine
 }
 
 func flushChannel(resCh chan ReplyRes) {
@@ -105,11 +104,11 @@ func flushChannel(resCh chan ReplyRes) {
 // --------------------------------------------------------------------
 
 func (kv *ShardKV) createResChan(cmtidx int) {
-	kv.chanMapMu.Lock()
+
 	if kv.resChanMap[cmtidx] == nil {
 		kv.resChanMap[cmtidx] = make(chan ReplyRes, ResChanSize)
 	}
-	kv.chanMapMu.Unlock()
+	
 }
 
 func (kv *ShardKV) PollConfig() {
@@ -119,15 +118,17 @@ func (kv *ShardKV) PollConfig() {
 				return
 			case <- kv.pcTimer.C:
 
+				kv.pcTimer.Reset(time.Duration(PollConfigTimeout)* time.Millisecond)
+
 				kv.mu.Lock()
 				nextConfigIdx := kv.config.Num + 1  // next config
 				kv.mu.Unlock()
 
 				newConfig := kv.mck.Query(nextConfigIdx) 
 
-				kv.mu.Lock()
-
 				if newConfig.Num == nextConfigIdx {  // got new config
+
+					kv.mu.Lock()
 
 					okToUpdate := true
 
@@ -145,17 +146,14 @@ func (kv *ShardKV) PollConfig() {
 						okToUpdate = false
 					}
 
+					kv.mu.Unlock()
+
 					if okToUpdate {
-						// fmt.Println(newConfig.Num)
 						op := ShardConfigOp{Config: newConfig}
 						kv.rf.Start(op)
 					}
 
 				}
-
-				kv.mu.Unlock()
-
-				kv.pcTimer.Reset(time.Duration(PollConfigTimeout)* time.Millisecond)
 		}
 	}
 }
@@ -166,6 +164,8 @@ func (kv *ShardKV) PollShards() {
 			case <- kv.killIt:
 				return
 			case <- kv.psTimer.C:
+
+				kv.psTimer.Reset(time.Duration(PollShardsTimeout)* time.Millisecond)
 
 				kv.mu.Lock()
 				localPullMap := make(map[ShardVer]ServerValid)
@@ -220,8 +220,6 @@ func (kv *ShardKV) PollShards() {
 
 					}
 				}
-
-				kv.psTimer.Reset(time.Duration(PollShardsTimeout)* time.Millisecond)
 		}
 	}
 }
@@ -231,12 +229,10 @@ func (kv *ShardKV) PollShards() {
 // --------------------------------------------------------------------
 
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
-	
+
 	kv.mu.Lock()
 
-	// if kv.shardsVerNum[args.Shard] == args.VerNum {
-	// if kv.config.Num == args.ConfNum {
-	if kv.config.Num >= args.ConfNum && kv.shardsVerNum[args.Shard] == args.VerNum {
+	if kv.config.Num >= args.ConfNum { 
 
 		reply.Success = true
 
@@ -263,10 +259,9 @@ func (kv *ShardKV) DeleteShard(args *DeleteShardArgs, reply *DeleteShardReply) {
 	
 	kv.mu.Lock()
 	kvConfNum := kv.config.Num
-	kvShardVer := kv.shardsVerNum[args.Shard]
 	kv.mu.Unlock()
 
-	if kvConfNum >= args.ConfNum && kvShardVer == args.VerNum {
+	if kvConfNum >= args.ConfNum { 
 
 		op := DeleteShardOp{Shard: args.Shard, ConfNum: args.ConfNum}
 
@@ -277,11 +272,10 @@ func (kv *ShardKV) DeleteShard(args *DeleteShardArgs, reply *DeleteShardReply) {
 			return
 		}
 
+		kv.mu.Lock()
 		kv.createResChan(cmtidx)
-
-		kv.chanMapMu.Lock()
 		resCh := kv.resChanMap[cmtidx]
-		kv.chanMapMu.Unlock()
+		kv.mu.Unlock()
 
 		select{
 			case res := <- resCh:
@@ -338,10 +332,7 @@ func (kv *ShardKV) ApplyDb() {
 					kv.rfidx = applymsg.Index
 
 					kv.createResChan(applymsg.Index)
-
-					kv.chanMapMu.Lock()
 					resCh := kv.resChanMap[applymsg.Index]
-					kv.chanMapMu.Unlock()
 
 					switch op := applymsg.Command.(type) { 
 
@@ -371,8 +362,6 @@ func (kv *ShardKV) ApplyDb() {
 								}
 
 								kv.config = op.Config 
-								
-								// fmt.Println("new config", kv.config)
 
 							}
 
@@ -398,14 +387,13 @@ func (kv *ShardKV) ApplyDb() {
 
 								kv.shardsVerNum[op.SV.Shard] = kv.config.Num  // update version number
 								
-								// fmt.Println("pull shards", "for shard #", op.SV.Shard, "pullMap", kv.pullMap, "shard version", op.SV, "in kvdb", op.KvDb)
 							}
 						
 						// ------------------- delete shard op -------------------						
 
 						case DeleteShardOp:
 							
-							if kv.shardsVerNum[op.Shard] <= op.ConfNum{
+							if kv.shardsVerNum[op.Shard] <= op.ConfNum{  
 
 								kv.kvdbs[op.Shard] = make(map[string]string)
 								kv.cltsqns[op.Shard] = make(map[int64]int64)
@@ -457,7 +445,6 @@ func (kv *ShardKV) ApplyDb() {
 									flushChannel(resCh)
 									resCh <- ReplyRes{Value:kv.kvdbs[shard][op.Key], InOp:op, WrongGroup: false, InTransit: false}	
 									
-									// fmt.Println("op success", op.Request, "shard #", shard, "ver num", kv.config.Num, "value", kv.kvdbs[shard][op.Key])
 								}
 							
 							} else {
@@ -535,11 +522,10 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
+	kv.mu.Lock()
 	kv.createResChan(cmtidx)
-
-	kv.chanMapMu.Lock()
 	resCh := kv.resChanMap[cmtidx]
-	kv.chanMapMu.Unlock()
+	kv.mu.Unlock()
 
 	select{
 		case res := <- resCh:
@@ -569,11 +555,10 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
+	kv.mu.Lock()
 	kv.createResChan(cmtidx)
-
-	kv.chanMapMu.Lock()
 	resCh := kv.resChanMap[cmtidx]
-	kv.chanMapMu.Unlock()
+	kv.mu.Unlock()
 
 	select{
 		case res := <- resCh:
