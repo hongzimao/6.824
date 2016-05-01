@@ -34,6 +34,15 @@ type PullShardOp struct {
 	SV 		ShardVer
 }
 
+type DeleteShardOp struct {
+	Shard   int
+	ConfNum int
+}
+
+type RemovePullMapOp struct {
+	SV 		ShardVer
+}
+
 type Op struct {
 	Request string  // "Put", "Append", "Get"
 	Key     string  
@@ -82,6 +91,15 @@ type ShardKV struct {
 	killIt chan bool   				   // close goroutine
 }
 
+func flushChannel(resCh chan ReplyRes) {
+	select {
+			case <- resCh:
+				// flush the channel
+			default:
+				// no need to flush
+		}
+}
+
 // --------------------------------------------------------------------
 // Background Functions
 // --------------------------------------------------------------------
@@ -118,7 +136,7 @@ func (kv *ShardKV) PollConfig() {
 						if g == kv.gid {  // in charge of this shard in current config
 							if kv.shardsVerNum[s] != kv.config.Num{  // config during transit
 								okToUpdate = false
-								break
+								break  
 							}
 						}
 					}
@@ -154,7 +172,9 @@ func (kv *ShardKV) PollShards() {
 
 				for shardVer, serversValid := range localPullMap {
 
-					if serversValid.Valid {  // needs shard from others	
+					if serversValid.Valid {  
+
+						// ---- needs shard from others	----
 
 						for si := 0; si < len(serversValid.Servers); si++ {
 
@@ -169,9 +189,31 @@ func (kv *ShardKV) PollShards() {
 
 								op := PullShardOp{KvDb: reply.KvDb, CltSqn: reply.CltSqn, SV: shardVer}
 								kv.rf.Start(op)
-
+								break  // got response already, no need to try more
 							}
 						}
+
+					} else { 
+
+						// ---- delete shard in the other side ----
+
+						for si := 0; si < len(serversValid.Servers); si++ {
+
+							srv := kv.make_end(serversValid.Servers[si])
+
+							args := DeleteShardArgs{Shard:shardVer.Shard, VerNum:shardVer.VerNum, ConfNum:shardVer.ConfNum}
+							var reply DeleteShardReply
+							
+							ok := srv.Call("ShardKV.DeleteShard", &args, &reply)
+							
+							if ok && reply.Success {  // got the reply from intended shard group
+
+								op := RemovePullMapOp{SV: shardVer}
+								kv.rf.Start(op)
+								break  // got response already, no need to try more
+							}
+						}
+
 					}
 				}
 
@@ -185,7 +227,7 @@ func (kv *ShardKV) PollShards() {
 // --------------------------------------------------------------------
 
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
-
+	
 	kv.mu.Lock()
 
 	// if kv.shardsVerNum[args.Shard] == args.VerNum {
@@ -211,6 +253,50 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	}
 
 	kv.mu.Unlock()
+}
+
+func (kv *ShardKV) DeleteShard(args *DeleteShardArgs, reply *DeleteShardReply) {
+	
+	kv.mu.Lock()
+	kvConfNum := kv.config.Num
+	kvShardVer := kv.shardsVerNum[args.Shard]
+	kv.mu.Unlock()
+
+	if kvConfNum >= args.ConfNum && kvShardVer == args.VerNum {
+
+		op := DeleteShardOp{Shard: args.Shard, ConfNum: args.ConfNum}
+
+		cmtidx, _, isLeader := kv.rf.Start(op)
+
+		if !isLeader{
+			reply.Success = false
+			return
+		}
+
+		kv.createResChan(cmtidx)
+
+		kv.chanMapMu.Lock()
+		resCh := kv.resChanMap[cmtidx]
+		kv.chanMapMu.Unlock()
+
+		select{
+			case res := <- resCh:
+				
+				if res.InTransit {
+					reply.Success = false
+				} else {
+					reply.Success = true
+				}
+
+			case <- time.After(ResChanTimeout * time.Millisecond): // RPC timeout
+				reply.Success = false
+		}
+
+	} else {
+
+		reply.Success = false
+	}
+
 }
 
 // --------------------------------------------------------------------
@@ -310,6 +396,30 @@ func (kv *ShardKV) ApplyDb() {
 								
 								// fmt.Println("pull shards", "for shard #", op.SV.Shard, "pullMap", kv.pullMap, "shard version", op.SV, "in kvdb", op.KvDb)
 							}
+						
+						// ------------------- delete shard op -------------------						
+
+						case DeleteShardOp:
+							
+							if kv.shardsVerNum[op.Shard] <= op.ConfNum{
+
+								kv.kvdbs[op.Shard] = make(map[string]string)
+								kv.cltsqns[op.Shard] = make(map[int64]int64)
+
+								flushChannel(resCh)
+								resCh <- ReplyRes{InTransit: false}
+
+							} else {
+
+								flushChannel(resCh)
+								resCh <- ReplyRes{InTransit: true}	
+							}
+
+						// ------------------- remove pull map op -------------------
+
+						case RemovePullMapOp:
+
+							delete(kv.pullMap, op.SV)
 
 						// ------------------- client request op -------------------
 
@@ -323,6 +433,7 @@ func (kv *ShardKV) ApplyDb() {
 
 								if kv.shardsVerNum[shard] != kv.config.Num {  // during transition
 
+									flushChannel(resCh)
 									resCh <- ReplyRes{InTransit: true}	
 
 								} else {
@@ -339,20 +450,14 @@ func (kv *ShardKV) ApplyDb() {
 										}
 									}
 
-									select{
-										case <- resCh:
-											// flush the channel
-										default:
-											// no need to flush
-									}
-
+									flushChannel(resCh)
 									resCh <- ReplyRes{Value:kv.kvdbs[shard][op.Key], InOp:op, WrongGroup: false, InTransit: false}	
 									
 									// fmt.Println("op success", op.Request, "shard #", shard, "ver num", kv.config.Num, "value", kv.kvdbs[shard][op.Key])
 								}
 							
 							} else {
-
+								flushChannel(resCh)
 								resCh <- ReplyRes{WrongGroup: true}	
 							}
 					
@@ -528,6 +633,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	gob.Register(Op{})
 	gob.Register(ShardConfigOp{})
 	gob.Register(PullShardOp{})
+	gob.Register(DeleteShardOp{})
+	gob.Register(RemovePullMapOp{})
 	gob.Register(GetArgs{})
 	gob.Register(GetReply{})
 	gob.Register(PutAppendArgs{})

@@ -56,6 +56,16 @@ type PullShardReply struct {
 	Success      bool
 }
 
+type DeleteShardArgs struct {
+	Shard 	     int
+	VerNum	     int
+	ConfNum		 int
+}
+
+type DeleteShardReply struct {
+	Success 	 bool
+}
+
 // Put or Append
 type PutAppendArgs struct {
 	Key   		 string
