@@ -7,6 +7,7 @@ import "sync"
 import "encoding/gob"
 import "time"
 import "reflect"
+import "sort"
 // import "fmt"
 
 const LogLenCheckerTimeout = 50 
@@ -139,28 +140,51 @@ func getMaxGID(maLoad map[int]int) int {
 		return VOIDGID
 	}
 
+	var sortKey []int
+	
+	for k, _ := range maLoad {
+		sortKey = append(sortKey, k)
+	}
+
+	sort.Ints(sortKey)
+
 	maxLoad := 0
 	maxGID := 0
-	for GID, load := range maLoad {
-		if load > maxLoad {
-			maxGID = GID
-			maxLoad = load
+
+	for _, k := range sortKey{
+
+		if maLoad[k] > maxLoad {
+			maxGID = k
+			maxLoad = maLoad[k]
 		}
+
 	}
+
 	return maxGID
 }
 
 func getMinGID(maLoad map[int]int) int {
+	
+	var sortKey []int
+	
+	for k, _ := range maLoad {
+		sortKey = append(sortKey, k)
+	}
+
+	sort.Ints(sortKey)
+
 	minLoad := NShards
 	minGID := 0
-	for GID, load := range maLoad {
-		if GID == VOIDGID {
+
+	for _, k := range sortKey{
+		if k == VOIDGID {
 			continue
-		} else if load <= minLoad {
-			minGID = GID
-			minLoad = load
+		} else if maLoad[k] <= minLoad {
+			minGID = k
+			minLoad = maLoad[k]
 		}
 	}
+
 	return minGID
 }
 

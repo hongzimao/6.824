@@ -53,6 +53,7 @@ type PullShardArgs struct {
 type PullShardReply struct {
 	KvDb    	 map[string]string
 	CltSqn  	 map[int64]int64  
+	ShardVer 	 int
 	Success      bool
 }
 

@@ -32,6 +32,7 @@ type PullShardOp struct {
 	KvDb    map[string]string
 	CltSqn  map[int64]int64  
 	SV 		ShardVer
+	Ver 	int
 }
 
 type DeleteShardOp struct {
@@ -90,15 +91,6 @@ type ShardKV struct {
 	killIt       chan bool   				   	 // close goroutine
 }
 
-func flushChannel(resCh chan ReplyRes) {
-	select {
-			case <- resCh:
-				// flush the channel
-			default:
-				// no need to flush
-		}
-}
-
 // --------------------------------------------------------------------
 // Background Functions
 // --------------------------------------------------------------------
@@ -109,6 +101,15 @@ func (kv *ShardKV) createResChan(cmtidx int) {
 		kv.resChanMap[cmtidx] = make(chan ReplyRes, ResChanSize)
 	}
 	
+}
+
+func flushChannel(resCh chan ReplyRes) {
+	select {
+			case <- resCh:
+				// flush the channel
+			default:
+				// no need to flush
+		}
 }
 
 func (kv *ShardKV) PollConfig() {
@@ -129,7 +130,6 @@ func (kv *ShardKV) PollConfig() {
 				if newConfig.Num == nextConfigIdx {  // got new config
 
 					kv.mu.Lock()
-
 					okToUpdate := true
 
 					for s := 0; s < shardmaster.NShards; s ++ {  
@@ -191,7 +191,7 @@ func (kv *ShardKV) PollShards() {
 
 							if ok && reply.Success {  // got the reply from intended shard group
 
-								op := PullShardOp{KvDb: reply.KvDb, CltSqn: reply.CltSqn, SV: shardVer}
+								op := PullShardOp{KvDb: reply.KvDb, CltSqn: reply.CltSqn, SV: shardVer, Ver: reply.ShardVer}
 								kv.rf.Start(op)
 								break  // got response already, no need to try more
 							}
@@ -207,7 +207,7 @@ func (kv *ShardKV) PollShards() {
 
 							args := DeleteShardArgs{Shard:shardVer.Shard, VerNum:shardVer.VerNum, ConfNum:shardVer.ConfNum}
 							var reply DeleteShardReply
-							
+
 							ok := srv.Call("ShardKV.DeleteShard", &args, &reply)
 							
 							if ok && reply.Success {  // got the reply from intended shard group
@@ -231,7 +231,7 @@ func (kv *ShardKV) PollShards() {
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 
 	kv.mu.Lock()
-
+	
 	if kv.config.Num >= args.ConfNum { 
 
 		reply.Success = true
@@ -247,6 +247,8 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 			reply.CltSqn[k] = v
 		}
 
+		reply.ShardVer = kv.shardsVerNum[args.Shard]
+
 	} else {
 
 		reply.Success = false
@@ -256,12 +258,13 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 }
 
 func (kv *ShardKV) DeleteShard(args *DeleteShardArgs, reply *DeleteShardReply) {
-	
+
 	kv.mu.Lock()
-	kvConfNum := kv.config.Num
+	localShardVerNum := kv.shardsVerNum[args.Shard]
+	localConfNum := args.ConfNum
 	kv.mu.Unlock()
 
-	if kvConfNum >= args.ConfNum { 
+	if localShardVerNum <= localConfNum {
 
 		op := DeleteShardOp{Shard: args.Shard, ConfNum: args.ConfNum}
 
@@ -273,6 +276,7 @@ func (kv *ShardKV) DeleteShard(args *DeleteShardArgs, reply *DeleteShardReply) {
 		}
 
 		kv.mu.Lock()
+
 		kv.createResChan(cmtidx)
 		resCh := kv.resChanMap[cmtidx]
 		kv.mu.Unlock()
@@ -294,6 +298,7 @@ func (kv *ShardKV) DeleteShard(args *DeleteShardArgs, reply *DeleteShardReply) {
 
 		reply.Success = false
 	}
+
 
 }
 
@@ -339,7 +344,7 @@ func (kv *ShardKV) ApplyDb() {
 						// ------------------- update config op -------------------
 
 						case ShardConfigOp:  // update config
-							
+
 							if op.Config.Num > kv.config.Num { 
 
 								for s := 0; s < shardmaster.NShards; s ++ {  
@@ -368,8 +373,8 @@ func (kv *ShardKV) ApplyDb() {
 						// ------------------- pull shard op -------------------
 
 						case PullShardOp:
-							
-							if kv.pullMap[op.SV].Valid {
+
+							if kv.pullMap[op.SV].Valid && op.Ver == kv.config.Num - 1 {
 
 								kv.kvdbs[op.SV.Shard] = make(map[string]string)
 								kv.cltsqns[op.SV.Shard] = make(map[int64]int64)
@@ -386,14 +391,14 @@ func (kv *ShardKV) ApplyDb() {
 																Valid: false}  // invalid pullMap
 
 								kv.shardsVerNum[op.SV.Shard] = kv.config.Num  // update version number
-								
+
 							}
 						
 						// ------------------- delete shard op -------------------						
 
 						case DeleteShardOp:
-							
-							if kv.shardsVerNum[op.Shard] <= op.ConfNum{  
+
+							if kv.shardsVerNum[op.Shard] <= op.ConfNum {  
 
 								kv.kvdbs[op.Shard] = make(map[string]string)
 								kv.cltsqns[op.Shard] = make(map[int64]int64)
@@ -416,7 +421,7 @@ func (kv *ShardKV) ApplyDb() {
 						// ------------------- client request op -------------------
 
 						case Op:  // user request
-
+							
 							// Check shard config
 							shard := key2shard(op.Key)
 							gid := kv.config.Shards[shard]
