@@ -57,8 +57,6 @@ func (sm *ShardMaster) CloneLastConfig() {
 		shards[i] = sm.LastConfig().Shards[i]
 	}
 
-	// Possible issue here!
-	// This execution is NOT deterministic
 	for GID, servers := range sm.LastConfig().Groups {
 		group[GID] = servers
 	}
